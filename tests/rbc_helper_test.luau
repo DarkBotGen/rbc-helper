@@ -371,6 +371,27 @@ cfg.flames.onlyRefreshReady = true
 chosen, stopDig = selectFlameTarget(rootPos, roseField, nowClock)
 assert(chosen == nil and stopDig == true, "onlyRefreshReady releases facing torque when no flame >= refreshAge")
 
+-- Shift Lock AutoRotate suppress/restore check
+local slHum = { AutoRotate = true, Parent = true }
+local savedAR, managedAR = nil, nil
+local function suppressAR(h)
+	if managedAR ~= h then
+		savedAR = h.AutoRotate
+		managedAR = h
+	end
+	h.AutoRotate = false
+end
+local function restoreAR()
+	if managedAR and managedAR.Parent and savedAR ~= nil then
+		managedAR.AutoRotate = savedAR
+	end
+	managedAR, savedAR = nil, nil
+end
+suppressAR(slHum)
+assert(slHum.AutoRotate == false, "Shift Lock compat should suppress AutoRotate while facing a flame")
+restoreAR()
+assert(slHum.AutoRotate == true, "AutoRotate must restore immediately when idle or released")
+
 -- 5. Digital Smiley Token Icon Matching & Countdown Timer Colors (< 0.9s Red cutoff)
 local SMILEY_ID = "5877939956"
 local SMILEY_GREEN = Color3.fromRGB(45, 240, 85)

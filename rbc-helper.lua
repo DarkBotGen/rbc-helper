@@ -86,6 +86,7 @@ local defaultCfg = {
 	},
 	flames = {
 		enabled = false,
+		shiftLockCompat = true,
 		refreshPriority = true,
 		onlyRefreshReady = false,
 		smartAutoDig = false,
@@ -692,14 +693,77 @@ function decorationsController:SetEnabled(enabled)
 	end
 end
 
--- Feature D: Standalone BodyGyro Auto-Face Flames & Refresh
+-- Feature D: Standalone BodyGyro Auto-Face Flames & Refresh (Shift Lock compatible)
+local FLAME_RENDER_STEP_NAME = "RbcHelperFlameFace"
+
+local function isShiftLockActive()
+	local ok, active = pcall(function()
+		return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+	end)
+	return ok and active == true
+end
+
+local function isClimbing(hum)
+	if not hum then
+		return false
+	end
+	local ok, state = pcall(function()
+		return hum:GetState() == Enum.HumanoidStateType.Climbing
+	end)
+	return ok and state == true
+end
+
 local flameController = {
 	tracked = {},
 	gyro = nil,
+	managedHumanoid = nil,
+	savedAutoRotate = nil,
+	renderBound = false,
 	stopDig = false,
 	statusLabel = nil,
 	lastStatusText = nil,
 }
+
+function flameController:SuppressAutoRotate(hum)
+	if not hum then
+		return
+	end
+	if self.managedHumanoid and self.managedHumanoid ~= hum then
+		self:RestoreAutoRotate()
+	end
+	if self.managedHumanoid ~= hum then
+		local okRead, orig = pcall(function()
+			return hum.AutoRotate
+		end)
+		self.savedAutoRotate = (okRead and type(orig) == "boolean") and orig or true
+		self.managedHumanoid = hum
+	end
+	pcall(function()
+		hum.AutoRotate = false
+	end)
+end
+
+function flameController:RestoreAutoRotate()
+	local hum = self.managedHumanoid
+	local saved = self.savedAutoRotate
+	self.managedHumanoid = nil
+	self.savedAutoRotate = nil
+	if hum and hum.Parent and saved ~= nil then
+		pcall(function()
+			hum.AutoRotate = saved
+		end)
+	end
+end
+
+function flameController:UnbindRenderStep()
+	connections:Cancel("flameFace")
+	if self.renderBound and RunService.UnbindFromRenderStep then
+		pcall(function()
+			RunService:UnbindFromRenderStep(FLAME_RENDER_STEP_NAME)
+		end)
+		self.renderBound = false
+	end
+end
 
 local function inspectFlame(flameObj, recordedSpawnTime, now)
 	if not flameObj or not flameObj.Parent then
@@ -756,8 +820,8 @@ function flameController:EnsureGyro(rootPart)
 		local okGyro, created = pcall(function()
 			local g = Instance.new("BodyGyro")
 			g.Name = "RbcFlameGyro"
-			g.P = 12000
-			g.D = 350
+			g.P = 20000
+			g.D = 400
 			g.MaxTorque = Vector3.new(0, 0, 0)
 			g.Parent = rootPart
 			return g
@@ -770,6 +834,7 @@ function flameController:EnsureGyro(rootPart)
 end
 
 function flameController:ReleaseGyro()
+	self:RestoreAutoRotate()
 	if self.gyro then
 		pcall(function()
 			self.gyro.MaxTorque = Vector3.new(0, 0, 0)
@@ -780,6 +845,7 @@ function flameController:ReleaseGyro()
 end
 
 function flameController:ZeroTorque()
+	self:RestoreAutoRotate()
 	if self.gyro then
 		pcall(function()
 			self.gyro.MaxTorque = Vector3.new(0, 0, 0)
@@ -909,12 +975,24 @@ function flameController:Step(now)
 		return
 	end
 
+	if cfg.flames.shiftLockCompat then
+		self:SuppressAutoRotate(hum)
+	else
+		self:RestoreAutoRotate()
+	end
+
+	local flatTarget = Vector3.new(targetEntry.pos.X, rootPos.Y, targetEntry.pos.Z)
+	local lookCf = CFrame.lookAt and CFrame.lookAt(rootPos, flatTarget) or CFrame.new(rootPos, flatTarget)
 	local gyro = self:EnsureGyro(rootPart)
 	if gyro then
-		local flatTarget = Vector3.new(targetEntry.pos.X, rootPos.Y, targetEntry.pos.Z)
 		pcall(function()
 			gyro.MaxTorque = Vector3.new(0, math.huge, 0)
-			gyro.CFrame = CFrame.lookAt and CFrame.lookAt(rootPos, flatTarget) or CFrame.new(rootPos, flatTarget)
+			gyro.CFrame = lookCf
+		end)
+	end
+	if cfg.flames.shiftLockCompat and isShiftLockActive() and not isClimbing(hum) then
+		pcall(function()
+			rootPart.CFrame = lookCf
 		end)
 	end
 
@@ -922,7 +1000,7 @@ function flameController:Step(now)
 end
 
 function flameController:SetEnabled(enabled)
-	connections:Cancel("flameFace")
+	self:UnbindRenderStep()
 	if not enabled then
 		self:ReleaseGyro()
 		self.stopDig = false
@@ -940,9 +1018,27 @@ function flameController:SetEnabled(enabled)
 		end
 	end
 	self:Step(os.clock())
-	connections:Add("flameFace", RunService.Heartbeat:Connect(function()
-		self:Step(os.clock())
-	end))
+	if RunService.BindToRenderStep then
+		local okPrio, camPrio = pcall(function()
+			return Enum.RenderPriority.Camera.Value
+		end)
+		local priority = (okPrio and type(camPrio) == "number") and (camPrio + 1) or 201
+		local okBind = pcall(function()
+			RunService:BindToRenderStep(FLAME_RENDER_STEP_NAME, priority, function()
+				self:Step(os.clock())
+			end)
+		end)
+		if okBind then
+			self.renderBound = true
+			return
+		end
+	end
+	local sig = RunService.RenderStepped or RunService.Heartbeat
+	if sig then
+		connections:Add("flameFace", sig:Connect(function()
+			self:Step(os.clock())
+		end))
+	end
 end
 
 local function syncSmartAutoDig()
@@ -2694,6 +2790,7 @@ controls.flamesEnabled = flameFolder.AddSwitch("Enable Flame Auto-Face", functio
 	flameController:SetEnabled(enabled)
 end, "flames", "enabled")
 
+controls.flamesShiftLockCompat = flameFolder.AddSwitch("Shift Lock Compatible", nil, "flames", "shiftLockCompat")
 controls.flamesRefreshPriority = flameFolder.AddSwitch("Prioritize Expiring Flames", nil, "flames", "refreshPriority")
 controls.flamesOnlyReady = flameFolder.AddSwitch("Only Face When Ready", nil, "flames", "onlyRefreshReady")
 
@@ -2742,6 +2839,7 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.walkspeed2.Set(cfg.movement.walkspeed2)
 	controls.hideDecorations.Set(cfg.decorations.hide)
 	controls.flamesEnabled.Set(cfg.flames.enabled)
+	controls.flamesShiftLockCompat.Set(cfg.flames.shiftLockCompat)
 	controls.flamesRefreshPriority.Set(cfg.flames.refreshPriority)
 	controls.flamesOnlyReady.Set(cfg.flames.onlyRefreshReady)
 	controls.flamesSmartDig.Set(cfg.flames.smartAutoDig)
@@ -2927,6 +3025,7 @@ cleanup = function()
 	connections:CancelAll()
 	walkSpeedController:Restore()
 	decorationsController:Restore()
+	flameController:UnbindRenderStep()
 	flameController:ReleaseGyro()
 	smileyHighlighter:ClearAll()
 	if ScreenGui and ScreenGui.Parent then
