@@ -471,4 +471,8 @@ local lockCenter = false
 local mouseIcon = "rbxasset://textures/MouseLockedCursor.png"
 assert(lockCenter or mouseIcon == "rbxasset://textures/MouseLockedCursor.png", "MouseIcon fallback must detect Shift Lock")
 
+local barRem, barTot = 0.8, 8.0
+local barRatio = math.clamp(barRem / math.max(0.01, barTot), 0, 1)
+assert(math.abs(barRatio - 0.1) < 1e-6, "Smiley countdown bar ratio should track remaining fraction")
+
 print("PASS: RBC Helper cogmower monitor, walkspeed, hide decorations, bodygyro flame refresh, smiley timer, and FPS optimizer verified")

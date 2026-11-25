@@ -840,6 +840,17 @@ local function extractLocalFxName(arg1, arg2)
 	return nil
 end
 
+local function isDescendantOf(inst, ancestor)
+	local p = inst
+	while p do
+		if p == ancestor then
+			return true
+		end
+		p = p.Parent
+	end
+	return false
+end
+
 local function isProtectedHighlightPart(inst)
 	local p = inst and inst.Parent
 	while p and p ~= workspace do
@@ -849,12 +860,14 @@ local function isProtectedHighlightPart(inst)
 		p = p.Parent
 	end
 	local n = inst and inst.Name
-	return n == "TokenBeacon" or n == "SmileyBeacon"
+	return n == "TokenBeacon" or n == "SmileyDropBeam" or n == "SmileyBeacon"
 end
 
 local fpsOptimizer = {
 	savedLighting = nil,
+	savedLightingIBL = nil,
 	savedLightingEffects = {},
+	savedAtmospheres = {},
 	savedTerrain = nil,
 	savedQualityLevel = nil,
 	savedPollenPopUpSetting = nil,
@@ -889,8 +902,13 @@ function fpsOptimizer:ApplyLowGraphicsPart(desc)
 	if not desc:IsA("BasePart") or isProtectedHighlightPart(desc) then
 		return
 	end
+	local char = localPlayer and localPlayer.Character
+	if char and isDescendantOf(desc, char) then
+		return
+	end
 	local okCheck, skip = pcall(function()
-		return desc.Material == Enum.Material.Neon
+		local mat = desc.Material
+		return mat == Enum.Material.Neon or mat == Enum.Material.ForceField or mat == Enum.Material.Glass
 	end)
 	if okCheck and skip then
 		return
@@ -938,6 +956,28 @@ function fpsOptimizer:RestoreLowGraphics()
 		end)
 	end
 
+	if self.savedLightingIBL and Lighting then
+		local ibl = self.savedLightingIBL
+		self.savedLightingIBL = nil
+		if ibl.EnvironmentSpecularScale ~= nil then
+			pcall(function()
+				Lighting.EnvironmentSpecularScale = ibl.EnvironmentSpecularScale
+			end)
+		end
+		if ibl.EnvironmentDiffuseScale ~= nil then
+			pcall(function()
+				Lighting.EnvironmentDiffuseScale = ibl.EnvironmentDiffuseScale
+			end)
+		end
+		if ibl.ShadowSoftness ~= nil then
+			pcall(function()
+				Lighting.ShadowSoftness = ibl.ShadowSoftness
+			end)
+		end
+	else
+		self.savedLightingIBL = nil
+	end
+
 	for eff, origEnabled in pairs(self.savedLightingEffects) do
 		if eff and eff.Parent then
 			pcall(function()
@@ -946,6 +986,15 @@ function fpsOptimizer:RestoreLowGraphics()
 		end
 	end
 	table.clear(self.savedLightingEffects)
+
+	for atmo, origDensity in pairs(self.savedAtmospheres) do
+		if atmo and atmo.Parent then
+			pcall(function()
+				atmo.Density = origDensity
+			end)
+		end
+	end
+	table.clear(self.savedAtmospheres)
 
 	if self.savedTerrain then
 		local t = self.savedTerrain
@@ -1004,6 +1053,37 @@ function fpsOptimizer:SetLowGraphics(enabled)
 			Lighting.FogEnd = 1e9
 			Lighting.FogStart = 1e9
 		end)
+		if not self.savedLightingIBL then
+			local ibl = {}
+			local okSpec, spec = pcall(function()
+				return Lighting.EnvironmentSpecularScale
+			end)
+			if okSpec and type(spec) == "number" then
+				ibl.EnvironmentSpecularScale = spec
+				pcall(function()
+					Lighting.EnvironmentSpecularScale = 0
+				end)
+			end
+			local okDiff, diff = pcall(function()
+				return Lighting.EnvironmentDiffuseScale
+			end)
+			if okDiff and type(diff) == "number" then
+				ibl.EnvironmentDiffuseScale = diff
+				pcall(function()
+					Lighting.EnvironmentDiffuseScale = 0
+				end)
+			end
+			local okSoft, soft = pcall(function()
+				return Lighting.ShadowSoftness
+			end)
+			if okSoft and type(soft) == "number" then
+				ibl.ShadowSoftness = soft
+				pcall(function()
+					Lighting.ShadowSoftness = 0
+				end)
+			end
+			self.savedLightingIBL = ibl
+		end
 		for _, eff in ipairs(Lighting:GetChildren()) do
 			if eff:IsA("PostEffect") then
 				local okE, wasOn = pcall(function()
@@ -1013,6 +1093,16 @@ function fpsOptimizer:SetLowGraphics(enabled)
 					self.savedLightingEffects[eff] = wasOn
 					pcall(function()
 						eff.Enabled = false
+					end)
+				end
+			elseif eff:IsA("Atmosphere") then
+				local okD, origD = pcall(function()
+					return eff.Density
+				end)
+				if okD and type(origD) == "number" then
+					self.savedAtmospheres[eff] = origD
+					pcall(function()
+						eff.Density = 0
 					end)
 				end
 			end
@@ -1032,6 +1122,14 @@ function fpsOptimizer:SetLowGraphics(enabled)
 					end
 					if Lighting.FogStart < 1e8 then
 						Lighting.FogStart = 1e9
+					end
+					if self.savedLightingIBL then
+						if self.savedLightingIBL.EnvironmentSpecularScale ~= nil and Lighting.EnvironmentSpecularScale ~= 0 then
+							Lighting.EnvironmentSpecularScale = 0
+						end
+						if self.savedLightingIBL.EnvironmentDiffuseScale ~= nil and Lighting.EnvironmentDiffuseScale ~= 0 then
+							Lighting.EnvironmentDiffuseScale = 0
+						end
 					end
 				end)
 			end))
@@ -2001,6 +2099,18 @@ local SMILEY_YELLOW = Color3.fromRGB(255, 225, 40)
 local SMILEY_ORANGE = Color3.fromRGB(255, 115, 30)
 local SMILEY_RED = Color3.fromRGB(255, 45, 55)
 
+local function makeVerticalCylinderCFrame(x, y, z)
+	if CFrame.Angles then
+		local ok, cf = pcall(function()
+			return CFrame.new(x, y, z) * CFrame.Angles(0, 0, math.rad(90))
+		end)
+		if ok and cf then
+			return cf
+		end
+	end
+	return CFrame.new(x, y, z)
+end
+
 local function lerpColor(a, b, t)
 	t = math.clamp(t, 0, 1)
 	return Color3.new(a.R + (b.R - a.R) * t, a.G + (b.G - a.G) * t, a.B + (b.B - a.B) * t)
@@ -2188,17 +2298,6 @@ function smileyHighlighter:UpdateEntry(entry, now, force)
 		return
 	end
 	local currentNow = now or os.clock()
-	local pos = getInstancePosition(entry.token)
-	if pos and entry.beamPart then
-		local last = entry.lastPos
-		if not last or (pos.X - last.X) ^ 2 + (pos.Y - last.Y) ^ 2 + (pos.Z - last.Z) ^ 2 >= 0.0025 then
-			entry.lastPos = pos
-			pcall(function()
-				entry.beamPart.CFrame = CFrame.new(pos.X, pos.Y - 4.5, pos.Z)
-			end)
-		end
-	end
-
 	local remaining = math.max(0, entry.endClock - currentNow)
 	local isRedNow = remaining < 0.9
 	local enabled = cfg.smiley.enabled == true
@@ -2216,9 +2315,21 @@ function smileyHighlighter:UpdateEntry(entry, now, force)
 	end
 
 	entry.lastVisualUpdate = currentNow
+	local pos = getInstancePosition(entry.token)
+	if pos and entry.beamPart then
+		local last = entry.lastPos
+		if not last or (pos.X - last.X) ^ 2 + (pos.Y - last.Y) ^ 2 + (pos.Z - last.Z) ^ 2 >= 0.0025 then
+			entry.lastPos = pos
+			pcall(function()
+				entry.beamPart.CFrame = makeVerticalCylinderCFrame(pos.X, pos.Y - 4.5, pos.Z)
+			end)
+		end
+	end
+
 	local color, isRed = getSmileyTimerColor(remaining, entry.totalDuration)
 	local timerText = string.format("%.1fs", remaining)
 	local titleText = isRed and "TOO LATE" or "SMILEY DUPED"
+	local barRatio = math.clamp(remaining / math.max(0.01, entry.totalDuration or 10), 0, 1)
 
 	local colorChanged = force or not entry.lastColor or math.abs(entry.lastColor.R - color.R) > 0.002 or math.abs(entry.lastColor.G - color.G) > 0.002 or math.abs(entry.lastColor.B - color.B) > 0.002
 	local enabledChanged = force or entry.lastEnabled ~= enabled
@@ -2226,6 +2337,7 @@ function smileyHighlighter:UpdateEntry(entry, now, force)
 	local timerVisChanged = force or entry.lastShowTimer ~= showTimer
 	local titleChanged = force or entry.lastTitleText ~= titleText
 	local timerTextChanged = force or entry.lastTimerText ~= timerText
+	local barChanged = force or not entry.lastBarRatio or math.abs(barRatio - entry.lastBarRatio) >= 0.01
 
 	entry.lastIsRed = isRedNow
 	entry.lastEnabled = enabled
@@ -2234,6 +2346,9 @@ function smileyHighlighter:UpdateEntry(entry, now, force)
 	entry.lastColor = color
 	entry.lastTitleText = titleText
 	entry.lastTimerText = timerText
+	if barChanged then
+		entry.lastBarRatio = barRatio
+	end
 
 	if entry.highlight and (colorChanged or enabledChanged) then
 		pcall(function()
@@ -2245,24 +2360,13 @@ function smileyHighlighter:UpdateEntry(entry, now, force)
 			end
 		end)
 	end
-	if entry.selectionBox and (colorChanged or enabledChanged) then
-		pcall(function()
-			if colorChanged then
-				entry.selectionBox.Color3 = color
-				entry.selectionBox.SurfaceColor3 = color
-			end
-			if enabledChanged then
-				entry.selectionBox.Visible = enabled
-			end
-		end)
-	end
 	if entry.beamPart and (colorChanged or beamChanged) then
 		pcall(function()
 			if colorChanged then
 				entry.beamPart.Color = color
 			end
 			if beamChanged then
-				entry.beamPart.Transparency = showBeam and 0.45 or 1
+				entry.beamPart.Transparency = showBeam and 0.32 or 1
 			end
 		end)
 	end
@@ -2306,6 +2410,16 @@ function smileyHighlighter:UpdateEntry(entry, now, force)
 			end
 		end)
 	end
+	if entry.barFill and (barChanged or colorChanged) then
+		pcall(function()
+			if barChanged then
+				entry.barFill.Size = UDim2.new(barRatio, 0, 1, 0)
+			end
+			if colorChanged then
+				entry.barFill.BackgroundColor3 = color
+			end
+		end)
+	end
 end
 
 function smileyHighlighter:Apply(token, spawnClock)
@@ -2337,6 +2451,7 @@ function smileyHighlighter:Apply(token, spawnClock)
 
 	local initialRem = math.max(0, endClock - now)
 	local initColor, initRed = getSmileyTimerColor(initialRem, totalDuration)
+	local initRatio = math.clamp(initialRem / math.max(0.01, totalDuration), 0, 1)
 
 	local highlight
 	local okHl, createdHl = pcall(function()
@@ -2344,9 +2459,9 @@ function smileyHighlighter:Apply(token, spawnClock)
 		hl.Name = "SmileyHighlight"
 		hl.Adornee = token
 		hl.FillColor = initColor
-		hl.FillTransparency = 0.25
+		hl.FillTransparency = 0.58
 		hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-		hl.OutlineTransparency = 0
+		hl.OutlineTransparency = 0.05
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Enabled = cfg.smiley.enabled
 		hl.Parent = entryFolder
@@ -2356,27 +2471,11 @@ function smileyHighlighter:Apply(token, spawnClock)
 		highlight = createdHl
 	end
 
-	local selectionBox
-	local okBox, createdBox = pcall(function()
-		local box = Instance.new("SelectionBox")
-		box.Name = "SmileyBox"
-		box.Adornee = token
-		box.Color3 = initColor
-		box.SurfaceColor3 = initColor
-		box.SurfaceTransparency = 0.65
-		box.LineThickness = 0.08
-		box.Visible = cfg.smiley.enabled
-		box.Parent = entryFolder
-		return box
-	end)
-	if okBox then
-		selectionBox = createdBox
-	end
-
 	local beamPart, beamAdornment
 	local okBeam, createdBeam, createdAdorn = pcall(function()
 		local part = Instance.new("Part")
 		part.Name = "SmileyDropBeam"
+		part.Shape = Enum.PartType.Cylinder
 		part.Anchored = true
 		part.CanCollide = false
 		part.CanTouch = false
@@ -2384,22 +2483,28 @@ function smileyHighlighter:Apply(token, spawnClock)
 		part.CastShadow = false
 		part.Material = Enum.Material.Neon
 		part.Color = initColor
-		part.Size = Vector3.new(0.45, 13, 0.45)
-		part.Transparency = (cfg.smiley.enabled and cfg.smiley.beam) and 0.45 or 1
+		part.Size = Vector3.new(13, 0.24, 0.24)
+		part.Transparency = (cfg.smiley.enabled and cfg.smiley.beam) and 0.32 or 1
 		if pos then
-			part.CFrame = CFrame.new(pos.X, pos.Y - 4.5, pos.Z)
+			part.CFrame = makeVerticalCylinderCFrame(pos.X, pos.Y - 4.5, pos.Z)
 		end
 		part.Parent = entryFolder
 
-		local adorn = Instance.new("BoxHandleAdornment")
+		local adorn = Instance.new("CylinderHandleAdornment")
 		adorn.Name = "SmileyDropBeamXRay"
 		adorn.Adornee = part
 		adorn.AlwaysOnTop = true
 		adorn.ZIndex = 5
 		adorn.Color3 = initColor
-		adorn.Size = part.Size
-		adorn.Transparency = 0.65
+		adorn.Radius = 0.09
+		adorn.Height = 13
+		adorn.Transparency = 0.68
 		adorn.Visible = cfg.smiley.enabled and cfg.smiley.beam
+		if CFrame.Angles then
+			pcall(function()
+				adorn.CFrame = CFrame.Angles(0, math.rad(90), 0)
+			end)
+		end
 		adorn.Parent = part
 
 		return part, adorn
@@ -2409,32 +2514,36 @@ function smileyHighlighter:Apply(token, spawnClock)
 		beamAdornment = createdAdorn
 	end
 
-	local billboard, stroke, titleLabel, timerLabel
-	local okGui, cGui, cStroke, cTitle, cTimer = pcall(function()
+	local billboard, stroke, titleLabel, timerLabel, barFill
+	local okGui, cGui, cStroke, cTitle, cTimer, cBarFill = pcall(function()
 		local gui = Instance.new("BillboardGui")
 		gui.Name = "SmileyTimerGui"
 		gui.Adornee = token
 		gui.AlwaysOnTop = true
-		gui.Size = UDim2.new(0, 116, 0, 42)
-		gui.StudsOffsetWorldSpace = Vector3.new(0, 3.6, 0)
+		gui.LightInfluence = 0
+		gui.MaxDistance = 260
+		gui.Size = UDim2.new(0, 108, 0, 44)
+		gui.StudsOffsetWorldSpace = Vector3.new(0, 3.4, 0)
 		gui.Enabled = cfg.smiley.enabled and cfg.smiley.timer
 		gui.Parent = entryFolder
 
 		local frame = Instance.new("Frame")
 		frame.Name = "TagFrame"
-		frame.BackgroundColor3 = Color3.fromRGB(16, 17, 20)
-		frame.BackgroundTransparency = 0.12
+		frame.BackgroundColor3 = Color3.fromRGB(13, 15, 20)
+		frame.BackgroundTransparency = 0.14
 		frame.BorderSizePixel = 0
+		frame.ClipsDescendants = true
 		frame.Size = UDim2.new(1, 0, 1, 0)
 		frame.Parent = gui
 
 		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(0, 5)
+		corner.CornerRadius = UDim.new(0, 6)
 		corner.Parent = frame
 
 		local uiStroke = Instance.new("UIStroke")
-		uiStroke.Thickness = 2
+		uiStroke.Thickness = 1.3
 		uiStroke.Color = initColor
+		uiStroke.Transparency = 0.2
 		uiStroke.Parent = frame
 
 		local tLbl = Instance.new("TextLabel")
@@ -2442,30 +2551,46 @@ function smileyHighlighter:Apply(token, spawnClock)
 		tLbl.BackgroundTransparency = 1
 		tLbl.Font = Enum.Font.GothamBold
 		tLbl.Position = UDim2.new(0, 4, 0, 2)
-		tLbl.Size = UDim2.new(1, -8, 0, 14)
+		tLbl.Size = UDim2.new(1, -8, 0, 13)
 		tLbl.Text = initRed and "TOO LATE" or "SMILEY DUPED"
 		tLbl.TextColor3 = initColor
-		tLbl.TextSize = 10
+		tLbl.TextSize = 9.5
 		tLbl.Parent = frame
 
 		local timeLbl = Instance.new("TextLabel")
 		timeLbl.Name = "TimerLabel"
 		timeLbl.BackgroundTransparency = 1
 		timeLbl.Font = Enum.Font.GothamBold
-		timeLbl.Position = UDim2.new(0, 4, 0, 16)
+		timeLbl.Position = UDim2.new(0, 4, 0, 14)
 		timeLbl.Size = UDim2.new(1, -8, 0, 22)
 		timeLbl.Text = string.format("%.1fs", initialRem)
 		timeLbl.TextColor3 = initColor
-		timeLbl.TextSize = 16
+		timeLbl.TextSize = 15
 		timeLbl.Parent = frame
 
-		return gui, uiStroke, tLbl, timeLbl
+		local track = Instance.new("Frame")
+		track.Name = "ProgressTrack"
+		track.BackgroundColor3 = Color3.fromRGB(30, 34, 45)
+		track.BorderSizePixel = 0
+		track.Position = UDim2.new(0, 0, 1, -3)
+		track.Size = UDim2.new(1, 0, 0, 3)
+		track.Parent = frame
+
+		local fill = Instance.new("Frame")
+		fill.Name = "ProgressFill"
+		fill.BackgroundColor3 = initColor
+		fill.BorderSizePixel = 0
+		fill.Size = UDim2.new(initRatio, 0, 1, 0)
+		fill.Parent = track
+
+		return gui, uiStroke, tLbl, timeLbl, fill
 	end)
 	if okGui then
 		billboard = cGui
 		stroke = cStroke
 		titleLabel = cTitle
 		timerLabel = cTimer
+		barFill = cBarFill
 	end
 
 	self.active[token] = {
@@ -2476,13 +2601,15 @@ function smileyHighlighter:Apply(token, spawnClock)
 		isFallback = isFallback,
 		folder = entryFolder,
 		highlight = highlight,
-		selectionBox = selectionBox,
 		beamPart = beamPart,
 		beamAdornment = beamAdornment,
 		billboard = billboard,
 		stroke = stroke,
 		titleLabel = titleLabel,
 		timerLabel = timerLabel,
+		barFill = barFill,
+		lastBarRatio = initRatio,
+		lastPos = pos,
 	}
 
 	self:SyncTickConnection()
@@ -2724,12 +2851,13 @@ local monitorState = {
 	notified = {},
 }
 
-local color_ = Color3.fromRGB(21, 22, 23)
-local color_2 = Color3.fromRGB(30, 30, 30)
-local color_3 = Color3.fromRGB(42, 42, 42)
-local color_4 = Color3.fromRGB(52, 53, 56)
-local color_5 = Color3.fromRGB(65, 67, 71)
-local uicolor = _G.uicolor or Color3.fromRGB(41, 74, 122)
+local color_ = Color3.fromRGB(16, 18, 24)
+local color_2 = Color3.fromRGB(22, 25, 33)
+local color_3 = Color3.fromRGB(30, 34, 45)
+local color_4 = Color3.fromRGB(38, 43, 56)
+local color_5 = Color3.fromRGB(58, 66, 86)
+local uicolor = _G.uicolor or Color3.fromRGB(59, 130, 246)
+local TWEEN_FAST = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local goldColor = Color3.fromRGB(250, 204, 21)
 local goldText = Color3.fromRGB(254, 240, 138)
 local goldDot = Color3.fromRGB(253, 224, 71)
@@ -2788,8 +2916,14 @@ end
 window.Parent = ScreenGui
 
 local windowCorner = Instance.new("UICorner")
-windowCorner.CornerRadius = UDim.new(0, 5)
+windowCorner.CornerRadius = UDim.new(0, 8)
 windowCorner.Parent = window
+
+local windowStroke = Instance.new("UIStroke")
+windowStroke.Thickness = 1
+windowStroke.Color = Color3.fromRGB(54, 62, 82)
+windowStroke.Transparency = 0.35
+windowStroke.Parent = window
 
 -- Shared Atlas+ UI Templates
 do
@@ -2801,7 +2935,7 @@ do
 	uiParts.bar = bar
 
 	local barCorner = Instance.new("UICorner")
-	barCorner.CornerRadius = UDim.new(0, 5)
+	barCorner.CornerRadius = UDim.new(0, 8)
 	barCorner.Parent = bar
 
 	local barTitle = Instance.new("TextLabel")
@@ -2809,18 +2943,21 @@ do
 	barTitle.BackgroundTransparency = 1
 	barTitle.Font = Enum.Font.GothamBold
 	barTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-	barTitle.TextSize = 14
+	barTitle.TextSize = 13.5
 	barTitle.TextXAlignment = Enum.TextXAlignment.Left
 	barTitle.Position = UDim2.new(0, 10, 0, 0)
 	barTitle.Size = UDim2.new(0.8, -10, 0, 25)
 	barTitle.Parent = bar
 
-	local barIndicator = Instance.new("ImageButton")
+	local barIndicator = Instance.new("TextButton")
 	barIndicator.Name = "Indicator"
+	barIndicator.AutoButtonColor = false
 	barIndicator.BackgroundTransparency = 1
-	barIndicator.Image = "https://www.roblox.com/Thumbs/Asset.ashx?width=420&height=420&assetId=4731371541"
-	barIndicator.Position = UDim2.new(1, -25, 0, 2.5)
-	barIndicator.Rotation = 90
+	barIndicator.Font = Enum.Font.GothamBold
+	barIndicator.Text = "▾"
+	barIndicator.TextColor3 = Color3.new(1, 1, 1)
+	barIndicator.TextSize = 14
+	barIndicator.Position = UDim2.new(1, -26, 0, 2)
 	barIndicator.Size = UDim2.new(0, 20, 0, 20)
 	barIndicator.Parent = bar
 
@@ -2844,7 +2981,7 @@ do
 	uiParts.tabbutton = tabBtn
 
 	local tabCorner = Instance.new("UICorner")
-	tabCorner.CornerRadius = UDim.new(0, 4)
+	tabCorner.CornerRadius = UDim.new(0, 5)
 	tabCorner.Parent = tabBtn
 
 	local tabIcon = Instance.new("ImageLabel")
@@ -2878,28 +3015,31 @@ do
 	folderBtn.BackgroundColor3 = color_3
 	folderBtn.BorderSizePixel = 0
 	folderBtn.Font = Enum.Font.GothamBold
-	folderBtn.TextColor3 = Color3.new(0.784314, 0.784314, 0.784314)
-	folderBtn.TextSize = 13
+	folderBtn.TextColor3 = Color3.fromRGB(228, 232, 240)
+	folderBtn.TextSize = 12.5
 	folderBtn.TextXAlignment = Enum.TextXAlignment.Left
 	folderBtn.Size = UDim2.new(1, 0, 0, 23)
 	folderBtn.Parent = folder
 
 	local folderCorner = Instance.new("UICorner")
 	folderCorner.Name = "UICorner"
-	folderCorner.CornerRadius = UDim.new(0, 4)
+	folderCorner.CornerRadius = UDim.new(0, 5)
 	folderCorner.Parent = folderBtn
 
-	local folderIndicator = Instance.new("ImageLabel")
+	local folderIndicator = Instance.new("TextLabel")
 	folderIndicator.Name = "Indicator"
 	folderIndicator.BackgroundTransparency = 1
-	folderIndicator.Image = "https://www.roblox.com/Thumbs/Asset.ashx?width=420&height=420&assetId=4731371541"
-	folderIndicator.Position = UDim2.new(1, -25, 0, 1)
-	folderIndicator.Rotation = 180
+	folderIndicator.Font = Enum.Font.GothamBold
+	folderIndicator.Text = "▸"
+	folderIndicator.TextColor3 = Color3.fromRGB(180, 190, 210)
+	folderIndicator.TextSize = 12
+	folderIndicator.Position = UDim2.new(1, -24, 0, 1)
 	folderIndicator.Size = UDim2.new(0, 20, 0, 20)
 	folderIndicator.Parent = folderBtn
 
 	local folderBox = Instance.new("Frame")
 	folderBox.Name = "Box"
+	folderBox.BackgroundColor3 = color_2
 	folderBox.BackgroundTransparency = 1
 	folderBox.BorderSizePixel = 0
 	folderBox.ClipsDescendants = true
@@ -2909,7 +3049,7 @@ do
 
 	local boxCorner = Instance.new("UICorner")
 	boxCorner.Name = "UICorner"
-	boxCorner.CornerRadius = UDim.new(0, 4)
+	boxCorner.CornerRadius = UDim.new(0, 5)
 	boxCorner.Parent = folderBox
 
 	local boxLayout = Instance.new("UIListLayout")
@@ -2940,72 +3080,91 @@ do
 	btnTemplate.ClipsDescendants = true
 	btnTemplate.Font = Enum.Font.GothamBold
 	btnTemplate.TextColor3 = Color3.new(1, 1, 1)
-	btnTemplate.TextSize = 13
+	btnTemplate.TextSize = 12.5
 	btnTemplate.Size = UDim2.new(0, 130, 0, 20)
 	uiParts.button = btnTemplate
 
 	local btnCorner = Instance.new("UICorner")
 	btnCorner.Name = "UICorner"
-	btnCorner.CornerRadius = UDim.new(0, 4)
+	btnCorner.CornerRadius = UDim.new(0, 5)
 	btnCorner.Parent = btnTemplate
 
 	local labelTemplate = Instance.new("TextLabel")
 	labelTemplate.Name = "Label"
 	labelTemplate.BackgroundTransparency = 1
 	labelTemplate.Font = Enum.Font.GothamSemibold
-	labelTemplate.TextColor3 = Color3.new(1, 1, 1)
+	labelTemplate.TextColor3 = Color3.fromRGB(225, 230, 240)
 	labelTemplate.TextSize = 12
 	labelTemplate.TextXAlignment = Enum.TextXAlignment.Left
 	labelTemplate.TextTruncate = Enum.TextTruncate.AtEnd
 	uiParts.label = labelTemplate
 
-	local switchTemplate = Instance.new("Frame")
+	local switchTemplate = Instance.new("TextButton")
 	switchTemplate.Name = "Switch"
+	switchTemplate.AutoButtonColor = false
 	switchTemplate.BackgroundTransparency = 1
 	switchTemplate.BorderSizePixel = 0
+	switchTemplate.Text = ""
 	switchTemplate.Size = UDim2.new(1, -20, 0, 20)
 	uiParts.switch = switchTemplate
 
-	local switchBtn = Instance.new("TextButton")
-	switchBtn.Name = "Switch"
-	switchBtn.AutoButtonColor = false
-	switchBtn.BackgroundColor3 = uicolor
-	switchBtn.BackgroundTransparency = 0.4
-	switchBtn.BorderSizePixel = 0
-	switchBtn.Font = Enum.Font.SourceSans
-	switchBtn.Text = ""
-	switchBtn.TextColor3 = Color3.new(1, 1, 1)
-	switchBtn.TextSize = 18
-	switchBtn.Size = UDim2.new(0, 20, 0, 20)
-	switchBtn.Parent = switchTemplate
+	local switchTrack = Instance.new("Frame")
+	switchTrack.Name = "Switch"
+	switchTrack.BackgroundColor3 = color_4
+	switchTrack.BackgroundTransparency = 0
+	switchTrack.BorderSizePixel = 0
+	switchTrack.Position = UDim2.new(0, 0, 0.5, -8)
+	switchTrack.Size = UDim2.new(0, 32, 0, 16)
+	switchTrack.Parent = switchTemplate
 
 	local switchCorner = Instance.new("UICorner")
 	switchCorner.Name = "UICorner"
-	switchCorner.CornerRadius = UDim.new(0, 4)
-	switchCorner.Parent = switchBtn
+	switchCorner.CornerRadius = UDim.new(1, 0)
+	switchCorner.Parent = switchTrack
+
+	local switchKnob = Instance.new("Frame")
+	switchKnob.Name = "Knob"
+	switchKnob.BackgroundColor3 = Color3.fromRGB(235, 240, 248)
+	switchKnob.BorderSizePixel = 0
+	switchKnob.Position = UDim2.new(0, 2, 0.5, -6)
+	switchKnob.Size = UDim2.new(0, 12, 0, 12)
+	switchKnob.Parent = switchTrack
+
+	local knobCorner = Instance.new("UICorner")
+	knobCorner.Name = "UICorner"
+	knobCorner.CornerRadius = UDim.new(1, 0)
+	knobCorner.Parent = switchKnob
 
 	local switchTitle = Instance.new("TextLabel")
 	switchTitle.Name = "Title"
 	switchTitle.BackgroundTransparency = 1
-	switchTitle.Position = UDim2.new(1.2, 0, 0, 0)
-	switchTitle.Size = UDim2.new(0, 180, 0, 20)
+	switchTitle.Position = UDim2.new(0, 42, 0, 0)
+	switchTitle.Size = UDim2.new(1, -42, 0, 20)
 	switchTitle.Font = Enum.Font.GothamSemibold
-	switchTitle.TextColor3 = Color3.new(0.784314, 0.784314, 0.784314)
-	switchTitle.TextSize = 13
+	switchTitle.TextColor3 = Color3.fromRGB(205, 212, 224)
+	switchTitle.TextSize = 12.5
 	switchTitle.TextXAlignment = Enum.TextXAlignment.Left
-	switchTitle.Parent = switchBtn
+	switchTitle.TextTruncate = Enum.TextTruncate.AtEnd
+	switchTitle.Parent = switchTemplate
 
 	local sliderTemplate = Instance.new("Frame")
 	sliderTemplate.Name = "Slider"
 	sliderTemplate.BackgroundColor3 = color_4
 	sliderTemplate.BorderSizePixel = 0
+	sliderTemplate.ClipsDescendants = true
 	sliderTemplate.Size = UDim2.new(1, -15, 0, 20)
 	uiParts.slider = sliderTemplate
 
 	local sliderCorner = Instance.new("UICorner")
 	sliderCorner.Name = "UICorner"
-	sliderCorner.CornerRadius = UDim.new(0, 4)
+	sliderCorner.CornerRadius = UDim.new(0, 5)
 	sliderCorner.Parent = sliderTemplate
+
+	local sliderStroke = Instance.new("UIStroke")
+	sliderStroke.Thickness = 1
+	sliderStroke.Color = color_5
+	sliderStroke.Transparency = 0.35
+	sliderStroke.Parent = sliderTemplate
 
 	local sliderHitbox = Instance.new("TextButton")
 	sliderHitbox.Name = "Button"
@@ -3017,22 +3176,23 @@ do
 
 	local sliderIndicator = Instance.new("Frame")
 	sliderIndicator.Name = "Indicator"
-	sliderIndicator.BackgroundColor3 = color_5
+	sliderIndicator.BackgroundColor3 = uicolor
+	sliderIndicator.BackgroundTransparency = 0.18
 	sliderIndicator.BorderSizePixel = 0
-	sliderIndicator.Size = UDim2.new(0, 0, 0, 20)
+	sliderIndicator.Size = UDim2.new(0, 0, 1, 0)
 	sliderIndicator.Parent = sliderTemplate
 
 	local indicatorCorner = Instance.new("UICorner")
 	indicatorCorner.Name = "UICorner"
-	indicatorCorner.CornerRadius = UDim.new(0, 4)
+	indicatorCorner.CornerRadius = UDim.new(0, 5)
 	indicatorCorner.Parent = sliderIndicator
 
 	local sliderTitle = Instance.new("TextLabel")
 	sliderTitle.Name = "Title"
 	sliderTitle.BackgroundTransparency = 1
 	sliderTitle.Font = Enum.Font.GothamBold
-	sliderTitle.TextColor3 = Color3.new(0.784314, 0.784314, 0.784314)
-	sliderTitle.TextSize = 13
+	sliderTitle.TextColor3 = Color3.fromRGB(232, 236, 244)
+	sliderTitle.TextSize = 12.5
 	sliderTitle.TextXAlignment = Enum.TextXAlignment.Center
 	sliderTitle.Position = UDim2.new(0.5, 0, 0.5, -10)
 	sliderTitle.Size = UDim2.new(0, 0, 0, 20)
@@ -3044,8 +3204,8 @@ do
 	sliderValue.BackgroundTransparency = 1
 	sliderValue.Font = Enum.Font.GothamBold
 	sliderValue.Text = "0"
-	sliderValue.TextColor3 = Color3.new(0.784314, 0.784314, 0.784314)
-	sliderValue.TextSize = 13
+	sliderValue.TextColor3 = Color3.fromRGB(232, 236, 244)
+	sliderValue.TextSize = 12.5
 	sliderValue.Position = UDim2.new(1, -45, 0.5, -10)
 	sliderValue.Size = UDim2.new(0, 40, 0, 20)
 	sliderValue.TextXAlignment = Enum.TextXAlignment.Right
@@ -3054,6 +3214,10 @@ do
 end
 
 -- Top bar for main window
+local tabButtonsHolder = nil
+local activeTabFrame = nil
+local activeTabFrame2 = nil
+local activeTabButton = nil
 local windowVisible = true
 do
 	local bar = uiParts.bar:Clone()
@@ -3073,12 +3237,17 @@ do
 	indicator.MouseButton1Click:Connect(function()
 		windowVisible = not windowVisible
 		bar.Frame.Visible = windowVisible
-		TweenService:Create(window, TweenInfo.new(0.1, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
+		indicator.Text = windowVisible and "▾" or "▸"
+		TweenService:Create(window, TWEEN_FAST, {
 			Size = windowVisible and UDim2.new(0, windowSize.X, 0, windowSize.Y) or UDim2.new(0, windowSize.X, 0, 25),
 		}):Play()
-		TweenService:Create(indicator, TweenInfo.new(0.1, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
-			Rotation = windowVisible and 90 or 180,
-		}):Play()
+		tabButtonsHolder.Visible = windowVisible
+		if activeTabFrame then
+			activeTabFrame.Visible = windowVisible
+		end
+		if activeTabFrame2 then
+			activeTabFrame2.Visible = windowVisible
+		end
 	end)
 end
 
@@ -3118,7 +3287,7 @@ mobileBtn.MouseButton1Click:Connect(function()
 end)
 
 -- Sidebar & Tab Area
-local tabButtonsHolder = Instance.new("Frame")
+tabButtonsHolder = Instance.new("Frame")
 tabButtonsHolder.Name = "TabButtons"
 tabButtonsHolder.BackgroundColor3 = color_2
 tabButtonsHolder.BackgroundTransparency = isDesktop and 0 or 1
@@ -3210,9 +3379,9 @@ divider.BorderSizePixel = 0
 divider.Size = UDim2.new(1, 0, 0, 2)
 divider.Parent = tabListScroll
 
-local activeTabFrame = nil
-local activeTabFrame2 = nil
-local activeTabButton = nil
+activeTabFrame = nil
+activeTabFrame2 = nil
+activeTabButton = nil
 local searchableItems = {}
 
 searchBox.Changed:Connect(function()
@@ -3243,18 +3412,33 @@ ui.Notify = function(title, description)
 		existing:Destroy()
 	end
 	local _, newlineCount = string.gsub(tostring(description), "\n", " ")
-	local toast = Instance.new("ImageLabel")
+	local toast = Instance.new("Frame")
 	toast.Name = "Tooltip"
-	toast.BackgroundTransparency = 1
-	toast.Image = "rbxassetid://11942813307"
-	toast.ImageColor3 = Color3.fromRGB(1, 1, 1)
-	toast.ImageTransparency = 0.25
-	toast.ScaleType = Enum.ScaleType.Slice
-	toast.SliceCenter = Rect.new(512, 512, 512, 512)
+	toast.BackgroundColor3 = Color3.fromRGB(16, 18, 24)
+	toast.BackgroundTransparency = 0.06
+	toast.BorderSizePixel = 0
+	toast.ClipsDescendants = true
 	toast.AnchorPoint = Vector2.new(1, 1)
 	toast.Position = UDim2.new(1, -8, 1, -8)
-	toast.Size = UDim2.new(0, newlineCount == 2 and 270 or 260, 0, newlineCount == 2 and 80 or 60)
+	toast.Size = UDim2.new(0, newlineCount == 2 and 272 or 262, 0, newlineCount == 2 and 78 or 58)
 	toast.Parent = ScreenGui
+
+	local toastCorner = Instance.new("UICorner")
+	toastCorner.CornerRadius = UDim.new(0, 7)
+	toastCorner.Parent = toast
+
+	local toastStroke = Instance.new("UIStroke")
+	toastStroke.Thickness = 1.2
+	toastStroke.Color = uicolor
+	toastStroke.Transparency = 0.25
+	toastStroke.Parent = toast
+
+	local toastAccent = Instance.new("Frame")
+	toastAccent.Name = "Accent"
+	toastAccent.BackgroundColor3 = uicolor
+	toastAccent.BorderSizePixel = 0
+	toastAccent.Size = UDim2.new(0, 3, 1, 0)
+	toastAccent.Parent = toast
 
 	local tTitle = Instance.new("TextLabel")
 	tTitle.Name = "Title"
@@ -3262,10 +3446,10 @@ ui.Notify = function(title, description)
 	tTitle.Font = Enum.Font.GothamBold
 	tTitle.Text = tostring(title)
 	tTitle.TextColor3 = Color3.new(1, 1, 1)
-	tTitle.TextSize = 14
+	tTitle.TextSize = 13.5
 	tTitle.TextXAlignment = Enum.TextXAlignment.Left
-	tTitle.Position = UDim2.new(0, 14, 0, newlineCount > 0 and 8 or 10)
-	tTitle.Size = UDim2.new(1, -24, 0, 20)
+	tTitle.Position = UDim2.new(0, 14, 0, newlineCount > 0 and 8 or 9)
+	tTitle.Size = UDim2.new(1, -22, 0, 19)
 	tTitle.Parent = toast
 
 	local tDesc = Instance.new("TextLabel")
@@ -3273,12 +3457,12 @@ ui.Notify = function(title, description)
 	tDesc.BackgroundTransparency = 1
 	tDesc.Font = Enum.Font.GothamSemibold
 	tDesc.Text = tostring(description)
-	tDesc.TextColor3 = Color3.fromRGB(220, 220, 225)
-	tDesc.TextSize = 13
+	tDesc.TextColor3 = Color3.fromRGB(205, 212, 224)
+	tDesc.TextSize = 12.5
 	tDesc.TextXAlignment = Enum.TextXAlignment.Left
 	tDesc.TextTruncate = Enum.TextTruncate.AtEnd
-	tDesc.Position = UDim2.new(0, 14, 0, newlineCount == 2 and 38 or 30)
-	tDesc.Size = UDim2.new(1, -24, 0, 20)
+	tDesc.Position = UDim2.new(0, 14, 0, newlineCount == 2 and 37 or 29)
+	tDesc.Size = UDim2.new(1, -22, 0, 19)
 	tDesc.Parent = toast
 
 	threads:Add("Tooltip", function()
@@ -3342,13 +3526,13 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 
 	tabBtn.MouseEnter:Connect(function()
 		if activeTabButton ~= tabBtn then
-			TweenService:Create(tabBtn, TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { BackgroundTransparency = 0.93 }):Play()
+			TweenService:Create(tabBtn, TWEEN_FAST, { BackgroundTransparency = 0.93 }):Play()
 		end
 	end)
 
 	tabBtn.MouseLeave:Connect(function()
 		if activeTabButton ~= tabBtn then
-			TweenService:Create(tabBtn, TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { BackgroundTransparency = 0.96 }):Play()
+			TweenService:Create(tabBtn, TWEEN_FAST, { BackgroundTransparency = 0.96 }):Play()
 		end
 	end)
 
@@ -3358,24 +3542,28 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 			if activeTabFrame2 then
 				activeTabFrame2.Parent = nil
 			end
-			TweenService:Create(activeTabButton, TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { BackgroundTransparency = 0.96 }):Play()
-			TweenService:Create(tabBtn, TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { BackgroundTransparency = 0.85 }):Play()
+			TweenService:Create(activeTabButton, TWEEN_FAST, { BackgroundTransparency = 0.96 }):Play()
+			TweenService:Create(tabBtn, TWEEN_FAST, { BackgroundTransparency = 0.85 }):Play()
+			scrollLeft.Visible = windowVisible
 			scrollLeft.Parent = window
 			activeTabButton = tabBtn
 			activeTabFrame = scrollLeft
 			activeTabFrame2 = scrollRight
 			if scrollRight then
+				scrollRight.Visible = windowVisible
 				scrollRight.Parent = window
 			end
 		end
 	end)
 
 	if startActive then
-		TweenService:Create(tabBtn, TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { BackgroundTransparency = 0.85 }):Play()
+		tabBtn.BackgroundTransparency = 0.85
+		scrollLeft.Visible = windowVisible
 		scrollLeft.Parent = window
 		activeTabButton = tabBtn
 		activeTabFrame = scrollLeft
 		if scrollRight then
+			scrollRight.Visible = windowVisible
 			scrollRight.Parent = window
 			activeTabFrame2 = scrollRight
 		end
@@ -3430,24 +3618,41 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 		folderApi.AddSwitch = function(text, callback, configSource, configKey)
 			local switchApi = {}
 			local row = uiParts.switch:Clone()
-			local switch = row.Switch
-			local titleLabel = switch.Title
+			local track = row.Switch
+			local knob = track.Knob
+			local titleLabel = row.Title
 			titleLabel.Text = text
 			row.Parent = box
+
+			local function renderSwitch(state, instant)
+				local targetColor = state and uicolor or color_4
+				local targetPos = state and UDim2.new(0, 18, 0.5, -6) or UDim2.new(0, 2, 0.5, -6)
+				local targetTitleColor = state and Color3.fromRGB(235, 240, 248) or Color3.fromRGB(205, 212, 224)
+				titleLabel.TextColor3 = targetTitleColor
+				if instant then
+					track.BackgroundColor3 = targetColor
+					knob.Position = targetPos
+				else
+					TweenService:Create(track, TWEEN_FAST, { BackgroundColor3 = targetColor }):Play()
+					TweenService:Create(knob, TWEEN_FAST, { Position = targetPos }):Play()
+				end
+			end
 
 			local isOn = false
 			local configTable = (configSource and type(configSource) == "string" and cfg[configSource]) or configSource
 			if configTable and configTable[configKey] then
 				isOn = true
-				switch.Text = utf8.char(10003)
+				renderSwitch(true, true)
 				if callback then
 					callback(true)
 				end
+			else
+				renderSwitch(false, true)
 			end
 
-			switch.MouseButton1Click:Connect(function()
+			row.MouseButton1Click:Connect(function()
 				isOn = not isOn
-				switch.Text = isOn and utf8.char(10003) or ""
+				renderSwitch(isOn, false)
 				if configTable then
 					configTable[configKey] = isOn
 					saveConfig()
@@ -3459,7 +3664,7 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 
 			switchApi.Set = function(newState, skipCallback)
 				isOn = newState == true
-				switch.Text = isOn and utf8.char(10003) or ""
+				renderSwitch(isOn, true)
 				if configTable then
 					configTable[configKey] = isOn
 					saveConfig()
@@ -3509,9 +3714,8 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 				local px = math.clamp(inputObj.Position.X - sliderRow.AbsolutePosition.X, 0, width)
 				local ratio = px / width
 				local val = formatSliderVal(minValue + ratio * (maxValue - minValue))
-				TweenService:Create(indicator, TweenInfo.new(0.08, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
-					Size = UDim2.new(0, px, 0, 20),
-				}):Play()
+				local fillRatio = (maxValue > minValue) and math.clamp((val - minValue) / (maxValue - minValue), 0, 1) or 0
+				indicator.Size = UDim2.new(fillRatio, 0, 1, 0)
 				valueLabel.Text = tostring(val)
 				if configTable then
 					configTable[configKey] = val
@@ -3535,13 +3739,9 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 			end)
 
 			sliderApi.Set = function(newValue, skipCallback)
-				local colWidth = (isDesktop and twoColumn and (windowSize.X * 0.5 - 47 - 5 - 10 - 15)) or (windowSize.X - 95 - 5 - 10 - 15)
-				colWidth = math.max(1, colWidth)
 				local val = formatSliderVal(tonumber(newValue) or minValue)
-				local fillRatio = (maxValue > minValue) and ((val - minValue) / (maxValue - minValue)) or 0
-				TweenService:Create(indicator, TweenInfo.new(0.08, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
-					Size = UDim2.new(0, fillRatio * colWidth, 0, 20),
-				}):Play()
+				local fillRatio = (maxValue > minValue) and math.clamp((val - minValue) / (maxValue - minValue), 0, 1) or 0
+				indicator.Size = UDim2.new(fillRatio, 0, 1, 0)
 				valueLabel.Text = tostring(val)
 				if configTable then
 					configTable[configKey] = val
@@ -3585,14 +3785,12 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 				measuredOnce = measuredHeight
 			end
 			folderFrame.Frame.Visible = openState
-			box.BackgroundTransparency = openState and 0.96 or 1
+			box.BackgroundTransparency = openState and 0.25 or 1
 			box.ClipsDescendants = not openState
 			isOpen = openState
-			TweenService:Create(folderFrame, TweenInfo.new(0.08, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
+			headerBtn.Indicator.Text = openState and "▾" or "▸"
+			TweenService:Create(folderFrame, TWEEN_FAST, {
 				Size = openState and UDim2.new(1, 0, 0, measuredHeight) or UDim2.new(1, 0, 0, 23),
-			}):Play()
-			TweenService:Create(headerBtn.Indicator, TweenInfo.new(0.08, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
-				Rotation = openState and 90 or 180,
 			}):Play()
 		end
 
@@ -3605,9 +3803,7 @@ ui.AddTab = function(tabName, image, twoColumn, startActive)
 					end
 				end
 				measuredOnce = measuredHeight
-				TweenService:Create(folderFrame, TweenInfo.new(0, Enum.EasingStyle.Linear, Enum.EasingDirection.In), {
-					Size = isOpen and UDim2.new(1, 0, 0, measuredHeight) or UDim2.new(1, 0, 0, 23),
-				}):Play()
+				folderFrame.Size = isOpen and UDim2.new(1, 0, 0, measuredHeight) or UDim2.new(1, 0, 0, 23)
 			end
 		end
 
@@ -3632,35 +3828,50 @@ monitorFrame.BackgroundTransparency = 0.06
 monitorFrame.BorderSizePixel = 0
 monitorFrame.ClipsDescendants = true
 monitorFrame.Position = UDim2.new(0.5, 0, 0, 10)
-monitorFrame.Size = UDim2.new(0, 440, 0, 38)
+monitorFrame.Size = UDim2.new(0, 440, 0, 34)
 monitorFrame.ZIndex = 10
 monitorFrame.Visible = cfg.monitor.enabled
 monitorFrame.Parent = ScreenGui
 
 local monitorCorner = Instance.new("UICorner")
-monitorCorner.CornerRadius = UDim.new(0, 6)
+monitorCorner.CornerRadius = UDim.new(0, 8)
 monitorCorner.Parent = monitorFrame
 
 local monitorStroke = Instance.new("UIStroke")
-monitorStroke.Thickness = 1.5
+monitorStroke.Thickness = 1.2
 monitorStroke.Color = uicolor
+monitorStroke.Transparency = 0.2
 monitorStroke.Parent = monitorFrame
 
 local monitorAccent = Instance.new("Frame")
 monitorAccent.Name = "Accent"
 monitorAccent.BackgroundColor3 = uicolor
 monitorAccent.BorderSizePixel = 0
-monitorAccent.Size = UDim2.new(1, 0, 0, 3)
+monitorAccent.Size = UDim2.new(1, 0, 0, 2)
 monitorAccent.ZIndex = 11
 monitorAccent.Parent = monitorFrame
+
+local monitorDotHalo = Instance.new("Frame")
+monitorDotHalo.Name = "DotHalo"
+monitorDotHalo.BackgroundColor3 = Color3.fromRGB(115, 130, 155)
+monitorDotHalo.BackgroundTransparency = 0.72
+monitorDotHalo.BorderSizePixel = 0
+monitorDotHalo.Position = UDim2.new(0, 10, 0.5, -6)
+monitorDotHalo.Size = UDim2.new(0, 14, 0, 14)
+monitorDotHalo.ZIndex = 11
+monitorDotHalo.Parent = monitorFrame
+
+local monitorDotHaloCorner = Instance.new("UICorner")
+monitorDotHaloCorner.CornerRadius = UDim.new(1, 0)
+monitorDotHaloCorner.Parent = monitorDotHalo
 
 local monitorDot = Instance.new("Frame")
 monitorDot.Name = "Dot"
 monitorDot.BackgroundColor3 = Color3.fromRGB(115, 130, 155)
 monitorDot.BorderSizePixel = 0
-monitorDot.Position = UDim2.new(0, 12, 0.5, -4)
-monitorDot.Size = UDim2.new(0, 10, 0, 10)
-monitorDot.ZIndex = 11
+monitorDot.Position = UDim2.new(0, 13, 0.5, -3)
+monitorDot.Size = UDim2.new(0, 8, 0, 8)
+monitorDot.ZIndex = 12
 monitorDot.Parent = monitorFrame
 
 local monitorDotCorner = Instance.new("UICorner")
@@ -3672,12 +3883,12 @@ monitorMainText.Name = "StatusText"
 monitorMainText.BackgroundTransparency = 1
 monitorMainText.Font = Enum.Font.GothamBold
 monitorMainText.Text = "GOLDEN COGMOWER  |  None on map"
-monitorMainText.TextColor3 = Color3.fromRGB(215, 220, 230)
-monitorMainText.TextSize = 13
+monitorMainText.TextColor3 = Color3.fromRGB(220, 226, 236)
+monitorMainText.TextSize = 12.5
 monitorMainText.TextXAlignment = Enum.TextXAlignment.Left
 monitorMainText.TextTruncate = Enum.TextTruncate.AtEnd
-monitorMainText.Position = UDim2.new(0, 30, 0, 3)
-monitorMainText.Size = UDim2.new(1, -120, 1, -3)
+monitorMainText.Position = UDim2.new(0, 32, 0, 2)
+monitorMainText.Size = UDim2.new(1, -122, 1, -2)
 monitorMainText.ZIndex = 11
 monitorMainText.Parent = monitorFrame
 
@@ -3691,12 +3902,12 @@ monitorBadge.TextColor3 = Color3.fromRGB(220, 225, 235)
 monitorBadge.TextSize = 11
 monitorBadge.AnchorPoint = Vector2.new(1, 0.5)
 monitorBadge.Position = UDim2.new(1, -10, 0.5, 1)
-monitorBadge.Size = UDim2.new(0, 74, 0, 22)
+monitorBadge.Size = UDim2.new(0, 74, 0, 20)
 monitorBadge.ZIndex = 11
 monitorBadge.Parent = monitorFrame
 
 local monitorBadgeCorner = Instance.new("UICorner")
-monitorBadgeCorner.CornerRadius = UDim.new(0, 4)
+monitorBadgeCorner.CornerRadius = UDim.new(1, 0)
 monitorBadgeCorner.Parent = monitorBadge
 
 monitorFrame.InputBegan:Connect(function(inputObj)
@@ -4055,6 +4266,7 @@ stepMonitor = function(skipMaintain)
 		if hasGold then
 			monitorStroke.Color = goldColor
 			monitorAccent.BackgroundColor3 = goldColor
+			monitorDotHalo.BackgroundColor3 = goldDot
 			monitorDot.BackgroundColor3 = goldDot
 			monitorMainText.TextColor3 = goldText
 			monitorBadge.BackgroundColor3 = goldColor
@@ -4063,11 +4275,12 @@ stepMonitor = function(skipMaintain)
 		else
 			monitorStroke.Color = uicolor
 			monitorAccent.BackgroundColor3 = uicolor
+			monitorDotHalo.BackgroundColor3 = Color3.fromRGB(115, 130, 155)
 			monitorDot.BackgroundColor3 = Color3.fromRGB(115, 130, 155)
-			monitorMainText.TextColor3 = Color3.fromRGB(215, 220, 230)
+			monitorMainText.TextColor3 = Color3.fromRGB(220, 226, 236)
 			monitorBadge.BackgroundColor3 = color_4
 			monitorBadge.TextColor3 = Color3.fromRGB(220, 225, 235)
-			monitorStatusLabel.TextColor3 = Color3.new(1, 1, 1)
+			monitorStatusLabel.TextColor3 = Color3.fromRGB(225, 230, 240)
 		end
 	end
 
@@ -4084,12 +4297,12 @@ stepMonitor = function(skipMaintain)
 		monitorMainText.Text = hudText
 		local targetWidth = 440
 		local okSize, measured = pcall(function()
-			return TextService:GetTextSize(hudText, 13, Enum.Font.GothamBold, Vector2.new(1000, 38))
+			return TextService:GetTextSize(hudText, 12.5, Enum.Font.GothamBold, Vector2.new(1000, 34))
 		end)
 		if okSize and measured then
 			targetWidth = math.clamp(measured.X + 135, 440, 680)
 		end
-		monitorFrame.Size = UDim2.new(0, targetWidth, 0, 38)
+		monitorFrame.Size = UDim2.new(0, targetWidth, 0, 34)
 	end
 
 	if not skipMaintain then
