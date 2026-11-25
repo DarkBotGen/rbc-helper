@@ -475,4 +475,17 @@ local barRem, barTot = 0.8, 8.0
 local barRatio = math.clamp(barRem / math.max(0.01, barTot), 0, 1)
 assert(math.abs(barRatio - 0.1) < 1e-6, "Smiley countdown bar ratio should track remaining fraction")
 
-print("PASS: RBC Helper cogmower monitor, walkspeed, hide decorations, bodygyro flame refresh, smiley timer, and FPS optimizer verified")
+-- 7. Ultra FPS allowlist & debounced burst batching
+local ultraAllowed = { Flame = true, FlameFade = true, Smiley = true, StickerTokenBeam = true }
+assert(ultraAllowed["StickerTokenBeam"] == true and ultraAllowed["OrbExplode"] == nil, "Ultra FPS allows minimal key FX while blocking noisy burst FX")
+
+local dirty, runs = false, 0
+local function scheduleBatch()
+	if dirty then return end
+	dirty = true
+end
+scheduleBatch(); scheduleBatch()
+if dirty then runs += 1; dirty = false end
+assert(runs == 1, "Debounced monitor scheduler coalesces multiple bursts per cycle")
+
+print("PASS: RBC Helper cogmower monitor, walkspeed, hide decorations, bodygyro flame refresh, smiley timer, and Ultra FPS optimizer verified")

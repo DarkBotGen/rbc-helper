@@ -86,6 +86,7 @@ local defaultCfg = {
 		hide = false,
 	},
 	perf = {
+		ultraFps = false,
 		lowGraphics = false,
 		hideBees = false,
 		filterParticles = false,
@@ -815,10 +816,16 @@ local BLOCKED_LOCAL_FX = {
 	SpotlightBeam = true,
 	StarSaw = true,
 	StarShowerGuide = true,
-	StickerTokenBeam = true,
 	SweepArch = true,
 	Triangulate = true,
 	WaterRipple = true,
+}
+
+local ULTRA_ALLOWED_LOCAL_FX = {
+	Flame = true,
+	FlameFade = true,
+	Smiley = true,
+	StickerTokenBeam = true,
 }
 
 local LOW_GFX_SKIP_FOLDERS = {
@@ -868,6 +875,7 @@ local fpsOptimizer = {
 	savedLightingIBL = nil,
 	savedLightingEffects = {},
 	savedAtmospheres = {},
+	savedClouds = {},
 	savedTerrain = nil,
 	savedQualityLevel = nil,
 	savedPollenPopUpSetting = nil,
@@ -879,7 +887,7 @@ local fpsOptimizer = {
 	detachedBeeSet = {},
 	hideBeesActive = false,
 
-	savedParticles = {},
+	savedParticles = setmetatable({}, { __mode = "k" }),
 	filterParticlesActive = false,
 	installedFxWrapper = nil,
 	origFxClientRun = nil,
@@ -934,7 +942,6 @@ end
 function fpsOptimizer:RestoreLowGraphics()
 	self.lowGfxActive = false
 	connections:Cancel("fpsLowGfxLighting")
-	connections:Cancel("fpsLowGfxDescAdded")
 	for inst, props in pairs(self.savedPartVisuals) do
 		if inst and inst.Parent then
 			pcall(function()
@@ -995,6 +1002,15 @@ function fpsOptimizer:RestoreLowGraphics()
 		end
 	end
 	table.clear(self.savedAtmospheres)
+
+	for cloudsInst, origEnabled in pairs(self.savedClouds) do
+		if cloudsInst and cloudsInst.Parent then
+			pcall(function()
+				cloudsInst.Enabled = origEnabled
+			end)
+		end
+	end
+	table.clear(self.savedClouds)
 
 	if self.savedTerrain then
 		local t = self.savedTerrain
@@ -1159,6 +1175,22 @@ function fpsOptimizer:SetLowGraphics(enabled)
 		end)
 	end
 
+	if terrain then
+		for _, child in ipairs(terrain:GetChildren()) do
+			if child:IsA("Clouds") and self.savedClouds[child] == nil then
+				local okC, origEnabled = pcall(function()
+					return child.Enabled
+				end)
+				if okC then
+					self.savedClouds[child] = origEnabled
+					pcall(function()
+						child.Enabled = false
+					end)
+				end
+			end
+		end
+	end
+
 	if self.savedQualityLevel == nil and type(settings) == "function" then
 		local okQ, qVal = pcall(function()
 			local renderSettings = settings().Rendering
@@ -1192,23 +1224,6 @@ function fpsOptimizer:SetLowGraphics(enabled)
 				end
 			end
 		end
-	end
-
-	connections:Cancel("fpsLowGfxDescAdded")
-	if workspace.DescendantAdded then
-		connections:Add("fpsLowGfxDescAdded", workspace.DescendantAdded:Connect(function(desc)
-			if not self.lowGfxActive or not desc:IsA("BasePart") then
-				return
-			end
-			local p = desc.Parent
-			while p and p ~= workspace do
-				if LOW_GFX_SKIP_FOLDERS[p.Name] then
-					return
-				end
-				p = p.Parent
-			end
-			self:ApplyLowGraphicsPart(desc)
-		end))
 	end
 end
 
@@ -1389,11 +1404,6 @@ function fpsOptimizer:ApplyParticlesFolder()
 	if not connections:Get("fpsParticlesRemoved") then
 		connections:Add("fpsParticlesRemoved", folder.ChildRemoved:Connect(function(child)
 			self.savedParticles[child] = nil
-			for inst in pairs(self.savedParticles) do
-				if not inst.Parent then
-					self.savedParticles[inst] = nil
-				end
-			end
 		end))
 	end
 end
@@ -1409,6 +1419,9 @@ function fpsOptimizer:SetFilterParticles(enabled)
 		local fxName = extractLocalFxName(arg1, arg2)
 		if not fxName then
 			return true
+		end
+		if cfg.perf.ultraFps then
+			return ULTRA_ALLOWED_LOCAL_FX[fxName] == true
 		end
 		if BLOCKED_LOCAL_FX[fxName] then
 			return false
@@ -4008,6 +4021,26 @@ controls.hideBalloons = worldFolder.AddSwitch("Hide Field Balloons", function(en
 	fpsOptimizer:SetHideBalloons(enabled)
 end, "perf", "hideBalloons")
 
+controls.ultraFps = worldFolder.AddSwitch("Ultra FPS Mode (Preset)", function(enabled)
+	if enabled then
+		controls.hideDecorations.Set(true)
+		controls.lowGraphics.Set(true)
+		controls.hideBees.Set(true)
+		controls.filterParticles.Set(true)
+		controls.hidePlayers.Set(true)
+		controls.hideFlowers.Set(true)
+		controls.hideBalloons.Set(true)
+	else
+		controls.filterParticles.Set(false)
+		controls.hideDecorations.Set(false)
+		controls.lowGraphics.Set(false)
+		controls.hideBees.Set(false)
+		controls.hidePlayers.Set(false)
+		controls.hideFlowers.Set(false)
+		controls.hideBalloons.Set(false)
+	end
+end, "perf", "ultraFps")
+
 worldFolder.Toggle(true, true)
 
 -- Right Column: Auto Face Flames (BodyGyro), Digital Smiley Tokens
@@ -4073,6 +4106,7 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.hidePlayers.Set(cfg.perf.hidePlayers)
 	controls.hideFlowers.Set(cfg.perf.hideFlowers)
 	controls.hideBalloons.Set(cfg.perf.hideBalloons)
+	controls.ultraFps.Set(cfg.perf.ultraFps, true)
 	controls.flamesEnabled.Set(cfg.flames.enabled)
 	controls.flamesShiftLockCompat.Set(cfg.flames.shiftLockCompat)
 	controls.flamesRefreshPriority.Set(cfg.flames.refreshPriority)
@@ -4098,6 +4132,25 @@ settingsFolder.Toggle(true, true)
 
 -- Runtime Watchers & Monitor Step
 local stepMonitor -- forward declared
+local monitorDirty = false
+
+local function scheduleMonitorStep()
+	if monitorDirty or not stepMonitor then
+		return
+	end
+	monitorDirty = true
+	if task and task.defer then
+		task.defer(function()
+			monitorDirty = false
+			if not threads.closed and stepMonitor then
+				stepMonitor(true)
+			end
+		end)
+	else
+		monitorDirty = false
+		stepMonitor(true)
+	end
+end
 
 local function bindMonstersFolder(folder)
 	connections:Cancel("monstersAdded")
@@ -4109,18 +4162,14 @@ local function bindMonstersFolder(folder)
 	connections:Add("monstersAdded", folder.ChildAdded:Connect(function(child)
 		if child.Name == "Gold Cogmower" then
 			goldCogMonitor:TrackIfMatch(child)
-			if stepMonitor then
-				stepMonitor(true)
-			end
+			scheduleMonitorStep()
 		end
 	end))
 	connections:Add("monstersRemoved", folder.ChildRemoved:Connect(function(child)
 		if child.Name == "Gold Cogmower" then
 			goldCogMonitor:Untrack(child)
 			monitorState.notified[child] = nil
-			if stepMonitor then
-				stepMonitor(true)
-			end
+			scheduleMonitorStep()
 		end
 	end))
 end
@@ -4156,14 +4205,10 @@ end
 connections:Add("workspaceChildren", workspace.ChildAdded:Connect(function(child)
 	if child.Name == "Gold Cogmower" then
 		goldCogMonitor:TrackIfMatch(child)
-		if stepMonitor then
-			stepMonitor(true)
-		end
+		scheduleMonitorStep()
 	elseif child.Name == "Monsters" then
 		bindMonstersFolder(child)
-		if stepMonitor then
-			stepMonitor(true)
-		end
+		scheduleMonitorStep()
 	elseif child.Name == "PlayerFlames" then
 		flameController:BindFolder(child)
 	elseif child.Name == "Bees" and cfg.perf.hideBees then
@@ -4199,9 +4244,7 @@ connections:Add("workspaceRemoved", workspace.ChildRemoved:Connect(function(chil
 	if child.Name == "Gold Cogmower" then
 		goldCogMonitor:Untrack(child)
 		monitorState.notified[child] = nil
-		if stepMonitor then
-			stepMonitor(true)
-		end
+		scheduleMonitorStep()
 	elseif child.Name == "Monsters" then
 		bindMonstersFolder(nil)
 	elseif child.Name == "PlayerFlames" then
