@@ -822,9 +822,11 @@ local BLOCKED_LOCAL_FX = {
 }
 
 local ULTRA_ALLOWED_LOCAL_FX = {
-	Flame = true,
-	FlameFade = true,
-	Smiley = true,
+	LocalFlames = true,
+	LocalTargetPracticeBeam = true,
+	["Precise Shot"] = true,
+	PrecisionPopUp = true,
+	CogSawProjectile = true,
 	StickerTokenBeam = true,
 }
 

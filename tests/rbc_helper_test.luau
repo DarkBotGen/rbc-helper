@@ -476,8 +476,22 @@ local barRatio = math.clamp(barRem / math.max(0.01, barTot), 0, 1)
 assert(math.abs(barRatio - 0.1) < 1e-6, "Smiley countdown bar ratio should track remaining fraction")
 
 -- 7. Ultra FPS allowlist & debounced burst batching
-local ultraAllowed = { Flame = true, FlameFade = true, Smiley = true, StickerTokenBeam = true }
-assert(ultraAllowed["StickerTokenBeam"] == true and ultraAllowed["OrbExplode"] == nil, "Ultra FPS allows minimal key FX while blocking noisy burst FX")
+local ultraAllowed = {
+	LocalFlames = true,
+	LocalTargetPracticeBeam = true,
+	["Precise Shot"] = true,
+	PrecisionPopUp = true,
+	CogSawProjectile = true,
+	StickerTokenBeam = true,
+}
+assert(
+	ultraAllowed["LocalFlames"] == true
+		and ultraAllowed["CogSawProjectile"] == true
+		and ultraAllowed["StickerTokenBeam"] == true
+		and ultraAllowed["OrbExplode"] == nil
+		and ultraAllowed["Bubble"] == nil,
+	"Ultra FPS allows real key combat/token FX while blocking noisy burst FX"
+)
 
 local dirty, runs = false, 0
 local function scheduleBatch()
