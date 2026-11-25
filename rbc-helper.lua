@@ -4029,7 +4029,7 @@ controls.ultraFps = worldFolder.AddSwitch("Ultra FPS Mode (Preset)", function(en
 		controls.lowGraphics.Set(true)
 		controls.hideBees.Set(true)
 		controls.filterParticles.Set(true)
-		controls.hidePlayers.Set(true)
+		controls.hidePlayers.Set(false)
 		controls.hideFlowers.Set(true)
 		controls.hideBalloons.Set(true)
 	else

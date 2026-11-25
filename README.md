@@ -17,7 +17,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/DarkBotGen/rbc-helper
 ```
 
 > **Performance & FPS Optimizer (`World / Performance`) & Clean UI**:
-> - One-click **Ultra FPS Mode (Preset)** toggles extreme potato/anti-lag optimizations together (Low Graphics + Clouds off, Hide Decorations, Hide Bees, Hide Players, Hide Flowers, Hide Field Balloons, and strict `ULTRA_ALLOWED_LOCAL_FX` filtering)
+> - One-click **Ultra FPS Mode (Preset)** toggles extreme potato/anti-lag optimizations together (Low Graphics + Clouds off, Hide Decorations, Hide Bees, Hide Flowers, Hide Field Balloons, and strict `ULTRA_ALLOWED_LOCAL_FX` filtering) while keeping **other players** visible by default (`Hide Other Players` remains available separately)
 > - Reversible **Low Graphics / Anti-Lag** (disables shadows, fog, IBL specular/diffuse, Atmosphere haze, `Clouds`, post-effects, water ripples, terrain grass, `PollenPopUps`, sets `Level01`, simplifies non-`Neon`/`Glass`/`ForceField` world parts while preserving `LocalPlayer.Character` and highlight/drop beams without hot `workspace.DescendantAdded` overhead)
 > - Reversible **Hide Bees**, **Hide Other Players**, **Hide Flowers**, **Hide Field Balloons**, and **Filter Particles (Keep Key FX)** (preserves `LocalFlames`, `Precise Shot`, `PrecisionPopUp`, `CogSawProjectile`, `Bubble`, star/coconut VFX, `StickerTokenBeam`)
 > - Zero-VRAM chevron icons, modern pill switches, scale-based sliders with zero drag tweens, slim HUD/toasts, debounced event-driven `goldCogMonitor`, weak `savedParticles` cleanup, 20Hz `smileyHighlighter` HUD throttle (with immediate `< 0.9s` red flip), and Shift Lock–compatible `flameController` target caching
