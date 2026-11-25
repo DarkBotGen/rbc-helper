@@ -38,6 +38,7 @@ local UserInputService = getService("UserInputService")
 local HttpService = getService("HttpService")
 local StarterGui = getService("StarterGui")
 local TextService = getService("TextService")
+local Lighting = getService("Lighting")
 
 if not isTestHarness and game.PlaceId ~= 1537690962 then
 	pcall(function()
@@ -83,6 +84,14 @@ local defaultCfg = {
 	},
 	decorations = {
 		hide = false,
+	},
+	perf = {
+		lowGraphics = false,
+		hideBees = false,
+		filterParticles = false,
+		hidePlayers = false,
+		hideFlowers = false,
+		hideBalloons = false,
 	},
 	flames = {
 		enabled = false,
@@ -277,6 +286,20 @@ do
 		if ok and type(mod) == "table" then
 			gameApi.DupedTokensAnimator = mod
 		end
+	end
+
+	local localFxMod = ReplicatedStorage:FindFirstChild("LocalFX")
+	if localFxMod then
+		local ok, mod = pcall(require, localFxMod)
+		if ok and type(mod) == "table" and type(mod.ClientRun) == "function" then
+			gameApi.LocalFX = mod
+		end
+	end
+
+	local eventsFolder = ReplicatedStorage:FindFirstChild("Events")
+	local playerSettingsEv = eventsFolder and eventsFolder:FindFirstChild("PlayerSettingsEvent")
+	if playerSettingsEv and playerSettingsEv.FireServer then
+		gameApi.PlayerSettingsEvent = playerSettingsEv
 	end
 end
 
@@ -485,32 +508,97 @@ local function resolveMobPosition(mob)
 	return getInstancePosition(mob)
 end
 
-local goldCogMonitor = {}
+local goldCogMonitor = {
+	tracked = {},
+	bound = false,
+}
+
+function goldCogMonitor:TrackIfMatch(inst)
+	if inst and inst.Name == "Gold Cogmower" then
+		self.tracked[inst] = self.tracked[inst] or {}
+	end
+end
+
+function goldCogMonitor:Untrack(inst)
+	if inst then
+		self.tracked[inst] = nil
+	end
+end
+
+function goldCogMonitor:BindContainer(container, tag)
+	connections:Cancel("goldCogAdd:" .. tag)
+	connections:Cancel("goldCogRem:" .. tag)
+	if not container then
+		return
+	end
+	for _, child in ipairs(container:GetChildren()) do
+		if child.Name == "Gold Cogmower" then
+			self.tracked[child] = self.tracked[child] or {}
+		end
+	end
+	if container.ChildAdded then
+		connections:Add("goldCogAdd:" .. tag, container.ChildAdded:Connect(function(child)
+			self:TrackIfMatch(child)
+		end))
+	end
+	if container.ChildRemoved then
+		connections:Add("goldCogRem:" .. tag, container.ChildRemoved:Connect(function(child)
+			self:Untrack(child)
+		end))
+	end
+end
+
+function goldCogMonitor:Init()
+	self.bound = true
+	self:BindContainer(workspace, "workspace")
+	self:BindContainer(workspace:FindFirstChild("Monsters"), "monsters")
+end
+
+function goldCogMonitor:Clear()
+	self.bound = false
+	connections:Cancel("goldCogAdd:workspace")
+	connections:Cancel("goldCogRem:workspace")
+	connections:Cancel("goldCogAdd:monsters")
+	connections:Cancel("goldCogRem:monsters")
+	table.clear(self.tracked)
+end
 
 function goldCogMonitor:Scan()
+	if not self.bound then
+		self:Init()
+	end
 	local found = {}
-	local seen = {}
+	local stale = nil
 
-	local function checkContainer(container)
-		if not container then
-			return
-		end
-		for _, child in ipairs(container:GetChildren()) do
-			if child.Name == "Gold Cogmower" and not seen[child] then
-				seen[child] = true
-				local pos = resolveMobPosition(child)
-				local field = pos and getFieldAt(pos) or nil
-				table.insert(found, {
-					instance = child,
-					pos = pos,
-					fieldName = field and field.Name or "Unknown Field",
-				})
+	for child, rec in pairs(self.tracked) do
+		local parent = child and child.Parent
+		if not child or not parent or (parent ~= workspace and parent.Name ~= "Monsters") then
+			stale = stale or {}
+			table.insert(stale, child)
+		else
+			local pos = resolveMobPosition(child)
+			local fieldName = rec.fieldName
+			if pos and (not rec.lastPos or math.abs(pos.X - rec.lastPos.X) > 2 or math.abs(pos.Z - rec.lastPos.Z) > 2 or (rec.field and not rec.field.Parent)) then
+				local field = getFieldAt(pos)
+				rec.field = field
+				rec.lastPos = pos
+				fieldName = field and field.Name or "Unknown Field"
+				rec.fieldName = fieldName
 			end
+			table.insert(found, {
+				instance = child,
+				pos = pos,
+				fieldName = fieldName or "Unknown Field",
+			})
 		end
 	end
 
-	checkContainer(workspace)
-	checkContainer(workspace:FindFirstChild("Monsters"))
+	if stale then
+		for _, obj in ipairs(stale) do
+			self.tracked[obj] = nil
+		end
+	end
+
 	return found
 end
 
@@ -693,12 +781,775 @@ function decorationsController:SetEnabled(enabled)
 	end
 end
 
+-- Reversible FPS Optimizer (No destructive :Destroy() on user world instances)
+local BLOCKED_LOCAL_FX = {
+	AquaWave = true,
+	BeamShot = true,
+	BeesmasLightsFallingStar = true,
+	BubbleBloatCollect = true,
+	CCRocket = true,
+	CCRocketCrosshairs = true,
+	CCRocketCrosshairsOld = true,
+	DiamondDrain = true,
+	EggShield = true,
+	FallingCoal = true,
+	FallingSnowflake = true,
+	FieldRectPulses = true,
+	GoldenRake = true,
+	GummyStar = true,
+	Gummyball = true,
+	HoneyHammer = true,
+	MechsquitoShot = true,
+	MythicMeteor = true,
+	OrbExplode = true,
+	PartyPopper = true,
+	PetalShuriken = true,
+	PluckedPetal = true,
+	PopStar = true,
+	PorcelainDipperAbility = true,
+	PuffshroomSporeThrow = true,
+	RectPulse = true,
+	RingPulse = true,
+	SnowballThrow = true,
+	SnowflakeBreeze = true,
+	SpotlightBeam = true,
+	StarSaw = true,
+	StarShowerGuide = true,
+	StickerTokenBeam = true,
+	SweepArch = true,
+	Triangulate = true,
+	WaterRipple = true,
+}
+
+local LOW_GFX_SKIP_FOLDERS = {
+	Collectibles = true,
+	PlayerFlames = true,
+	Particles = true,
+	Happenings = true,
+	PuffAssistantTokenHighlights = true,
+	RbcHelperSmileyHighlights = true,
+}
+
+local function extractLocalFxName(arg1, arg2)
+	if type(arg1) == "string" then
+		return arg1
+	end
+	if type(arg2) == "string" then
+		return arg2
+	end
+	return nil
+end
+
+local function isProtectedHighlightPart(inst)
+	local p = inst and inst.Parent
+	while p and p ~= workspace do
+		if p.Name == "PuffAssistantTokenHighlights" or p.Name == "RbcHelperSmileyHighlights" then
+			return true
+		end
+		p = p.Parent
+	end
+	local n = inst and inst.Name
+	return n == "TokenBeacon" or n == "SmileyBeacon"
+end
+
+local fpsOptimizer = {
+	savedLighting = nil,
+	savedLightingEffects = {},
+	savedTerrain = nil,
+	savedQualityLevel = nil,
+	savedPollenPopUpSetting = nil,
+	pollenPopUpChanged = false,
+	savedPartVisuals = {},
+	lowGfxActive = false,
+
+	detachedBees = {},
+	detachedBeeSet = {},
+	hideBeesActive = false,
+
+	savedParticles = {},
+	filterParticlesActive = false,
+	installedFxWrapper = nil,
+	origFxClientRun = nil,
+
+	savedPlayers = {},
+	playerCharWatched = {},
+	hidePlayersActive = false,
+
+	detachedFlowers = nil,
+	hideFlowersActive = false,
+
+	detachedBalloons = nil,
+	hideBalloonsActive = false,
+}
+
+function fpsOptimizer:ApplyLowGraphicsPart(desc)
+	if not self.lowGfxActive or not desc or not desc.Parent or self.savedPartVisuals[desc] then
+		return
+	end
+	if not desc:IsA("BasePart") or isProtectedHighlightPart(desc) then
+		return
+	end
+	local okCheck, skip = pcall(function()
+		return desc.Material == Enum.Material.Neon
+	end)
+	if okCheck and skip then
+		return
+	end
+	local okRead, origMat, origShadow, origRefl = pcall(function()
+		return desc.Material, desc.CastShadow, desc.Reflectance
+	end)
+	if not okRead then
+		return
+	end
+	self.savedPartVisuals[desc] = {
+		Material = origMat,
+		CastShadow = origShadow,
+		Reflectance = origRefl,
+	}
+	pcall(function()
+		desc.CastShadow = false
+		desc.Reflectance = 0
+		desc.Material = Enum.Material.SmoothPlastic
+	end)
+end
+
+function fpsOptimizer:RestoreLowGraphics()
+	self.lowGfxActive = false
+	connections:Cancel("fpsLowGfxLighting")
+	connections:Cancel("fpsLowGfxDescAdded")
+	for inst, props in pairs(self.savedPartVisuals) do
+		if inst and inst.Parent then
+			pcall(function()
+				inst.Material = props.Material
+				inst.CastShadow = props.CastShadow
+				inst.Reflectance = props.Reflectance
+			end)
+		end
+	end
+	table.clear(self.savedPartVisuals)
+
+	if self.savedLighting and Lighting then
+		local l = self.savedLighting
+		self.savedLighting = nil
+		pcall(function()
+			Lighting.GlobalShadows = l.GlobalShadows
+			Lighting.FogEnd = l.FogEnd
+			Lighting.FogStart = l.FogStart
+		end)
+	end
+
+	for eff, origEnabled in pairs(self.savedLightingEffects) do
+		if eff and eff.Parent then
+			pcall(function()
+				eff.Enabled = origEnabled
+			end)
+		end
+	end
+	table.clear(self.savedLightingEffects)
+
+	if self.savedTerrain then
+		local t = self.savedTerrain
+		self.savedTerrain = nil
+		local terrain = workspace:FindFirstChildOfClass("Terrain")
+		if terrain then
+			pcall(function()
+				terrain.WaterWaveSize = t.WaterWaveSize
+				terrain.WaterWaveSpeed = t.WaterWaveSpeed
+				terrain.WaterReflectance = t.WaterReflectance
+				terrain.WaterTransparency = t.WaterTransparency
+				terrain.Decoration = t.Decoration
+			end)
+		end
+	end
+
+	if self.savedQualityLevel ~= nil and type(settings) == "function" then
+		local origQ = self.savedQualityLevel
+		self.savedQualityLevel = nil
+		pcall(function()
+			settings().Rendering.QualityLevel = origQ
+		end)
+	else
+		self.savedQualityLevel = nil
+	end
+
+	if self.pollenPopUpChanged then
+		local restoreVal = self.savedPollenPopUpSetting ~= false
+		self.pollenPopUpChanged = false
+		self.savedPollenPopUpSetting = nil
+		if gameApi.PlayerSettingsEvent then
+			pcall(secureCall, gameApi.PlayerSettingsEvent.FireServer, gameApi.PlayerSettingsEvent, "PollenPopUps", restoreVal)
+		end
+	end
+end
+
+function fpsOptimizer:SetLowGraphics(enabled)
+	if not enabled then
+		self:RestoreLowGraphics()
+		return
+	end
+	if self.lowGfxActive then
+		return
+	end
+	self.lowGfxActive = true
+
+	if Lighting and not self.savedLighting then
+		local okL, gs, fe, fs = pcall(function()
+			return Lighting.GlobalShadows, Lighting.FogEnd, Lighting.FogStart
+		end)
+		if okL then
+			self.savedLighting = { GlobalShadows = gs, FogEnd = fe, FogStart = fs }
+		end
+		pcall(function()
+			Lighting.GlobalShadows = false
+			Lighting.FogEnd = 1e9
+			Lighting.FogStart = 1e9
+		end)
+		for _, eff in ipairs(Lighting:GetChildren()) do
+			if eff:IsA("PostEffect") then
+				local okE, wasOn = pcall(function()
+					return eff.Enabled
+				end)
+				if okE then
+					self.savedLightingEffects[eff] = wasOn
+					pcall(function()
+						eff.Enabled = false
+					end)
+				end
+			end
+		end
+		if Lighting.Changed then
+			connections:Cancel("fpsLowGfxLighting")
+			connections:Add("fpsLowGfxLighting", Lighting.Changed:Connect(function()
+				if not self.lowGfxActive then
+					return
+				end
+				pcall(function()
+					if Lighting.GlobalShadows ~= false then
+						Lighting.GlobalShadows = false
+					end
+					if Lighting.FogEnd < 1e8 then
+						Lighting.FogEnd = 1e9
+					end
+					if Lighting.FogStart < 1e8 then
+						Lighting.FogStart = 1e9
+					end
+				end)
+			end))
+		end
+	end
+
+	local terrain = workspace:FindFirstChildOfClass("Terrain")
+	if terrain and not self.savedTerrain then
+		local okT, ws, wsp, wr, wt, dec = pcall(function()
+			return terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency, terrain.Decoration
+		end)
+		if okT then
+			self.savedTerrain = {
+				WaterWaveSize = ws,
+				WaterWaveSpeed = wsp,
+				WaterReflectance = wr,
+				WaterTransparency = wt,
+				Decoration = dec,
+			}
+		end
+		pcall(function()
+			terrain.WaterWaveSize = 0
+			terrain.WaterWaveSpeed = 0
+			terrain.WaterReflectance = 0
+			terrain.WaterTransparency = 0
+			terrain.Decoration = false
+		end)
+	end
+
+	if self.savedQualityLevel == nil and type(settings) == "function" then
+		local okQ, qVal = pcall(function()
+			local renderSettings = settings().Rendering
+			local orig = renderSettings.QualityLevel
+			renderSettings.QualityLevel = Enum.QualityLevel.Level01
+			return orig
+		end)
+		if okQ then
+			self.savedQualityLevel = qVal
+		end
+	end
+
+	if not self.pollenPopUpChanged and gameApi.PlayerSettingsEvent then
+		local curPopUp = gameApi:Cache({ "Settings", "PollenPopUps" })
+		if curPopUp ~= false then
+			self.savedPollenPopUpSetting = curPopUp == nil and true or curPopUp
+			self.pollenPopUpChanged = true
+			pcall(secureCall, gameApi.PlayerSettingsEvent.FireServer, gameApi.PlayerSettingsEvent, "PollenPopUps", false)
+		end
+	end
+
+	for _, topChild in ipairs(workspace:GetChildren()) do
+		if not LOW_GFX_SKIP_FOLDERS[topChild.Name] then
+			if topChild:IsA("BasePart") then
+				self:ApplyLowGraphicsPart(topChild)
+			else
+				for _, desc in ipairs(topChild:GetDescendants()) do
+					if desc:IsA("BasePart") then
+						self:ApplyLowGraphicsPart(desc)
+					end
+				end
+			end
+		end
+	end
+
+	connections:Cancel("fpsLowGfxDescAdded")
+	if workspace.DescendantAdded then
+		connections:Add("fpsLowGfxDescAdded", workspace.DescendantAdded:Connect(function(desc)
+			if not self.lowGfxActive or not desc:IsA("BasePart") then
+				return
+			end
+			local p = desc.Parent
+			while p and p ~= workspace do
+				if LOW_GFX_SKIP_FOLDERS[p.Name] then
+					return
+				end
+				p = p.Parent
+			end
+			self:ApplyLowGraphicsPart(desc)
+		end))
+	end
+end
+
+function fpsOptimizer:DetachBee(bee)
+	if not self.hideBeesActive or not bee or self.detachedBeeSet[bee] then
+		return
+	end
+	local okParent, origParent = pcall(function()
+		return bee.Parent
+	end)
+	if not okParent or not origParent then
+		return
+	end
+	self.detachedBeeSet[bee] = true
+	table.insert(self.detachedBees, { inst = bee, parent = origParent })
+	pcall(function()
+		bee.Parent = nil
+	end)
+end
+
+function fpsOptimizer:RestoreBees()
+	self.hideBeesActive = false
+	connections:Cancel("fpsBeesAdded")
+	for i = #self.detachedBees, 1, -1 do
+		local entry = self.detachedBees[i]
+		if entry.inst and entry.parent and entry.parent.Parent then
+			pcall(function()
+				entry.inst.Parent = entry.parent
+			end)
+		end
+	end
+	table.clear(self.detachedBees)
+	table.clear(self.detachedBeeSet)
+end
+
+function fpsOptimizer:SetHideBees(enabled)
+	if not enabled then
+		self:RestoreBees()
+		return
+	end
+	self.hideBeesActive = true
+	local bees = workspace:FindFirstChild("Bees")
+	if bees then
+		for _, child in ipairs(bees:GetChildren()) do
+			self:DetachBee(child)
+		end
+		if not connections:Get("fpsBeesAdded") then
+			connections:Add("fpsBeesAdded", bees.ChildAdded:Connect(function(child)
+				if task and task.defer then
+					task.defer(function()
+						if self.hideBeesActive then
+							self:DetachBee(child)
+						end
+					end)
+				else
+					self:DetachBee(child)
+				end
+			end))
+		end
+	end
+end
+
+function fpsOptimizer:SyncParticlesInstance(inst)
+	if not inst or not inst.Parent then
+		return
+	end
+	if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") then
+		if self.savedParticles[inst] == nil then
+			local ok, wasOn = pcall(function()
+				return inst.Enabled
+			end)
+			self.savedParticles[inst] = ok and wasOn or true
+		end
+		pcall(function()
+			inst.Enabled = false
+		end)
+	end
+end
+
+function fpsOptimizer:RestoreParticles()
+	self.filterParticlesActive = false
+	_G.__rbcHelperLocalFxFilter = nil
+	connections:Cancel("fpsParticlesDescAdded")
+	connections:Cancel("fpsParticlesRemoved")
+	for inst, origEnabled in pairs(self.savedParticles) do
+		if inst and inst.Parent then
+			pcall(function()
+				inst.Enabled = origEnabled
+			end)
+		end
+	end
+	table.clear(self.savedParticles)
+end
+
+function fpsOptimizer:EnsureLocalFxHook()
+	if not gameApi.LocalFX or type(gameApi.LocalFX.ClientRun) ~= "function" then
+		return
+	end
+	if _G.__rbcHelperLocalFxHooked then
+		return
+	end
+	if type(hookfunction) == "function" then
+		local okHook = pcall(function()
+			local origFn
+			local hookFn = function(...)
+				local filterFn = _G.__rbcHelperLocalFxFilter
+				if filterFn then
+					local okKeep, keep = pcall(filterFn, ...)
+					if okKeep and keep == false then
+						return nil
+					end
+				end
+				return origFn(...)
+			end
+			if newcclosure then
+				hookFn = newcclosure(hookFn)
+			end
+			origFn = hookfunction(gameApi.LocalFX.ClientRun, hookFn)
+		end)
+		if okHook then
+			_G.__rbcHelperLocalFxHooked = true
+			_G.__rbcHelperLocalFxHookMethod = "hookfunction"
+			self.installedFxWrapper = true
+			return
+		end
+	end
+	if not _G.__rbcHelperLocalFxOrig then
+		_G.__rbcHelperLocalFxOrig = gameApi.LocalFX.ClientRun
+	end
+	local origFn = _G.__rbcHelperLocalFxOrig
+	local wrapper = function(...)
+		local filterFn = _G.__rbcHelperLocalFxFilter
+		if filterFn then
+			local okKeep, keep = pcall(filterFn, ...)
+			if okKeep and keep == false then
+				return nil
+			end
+		end
+		return origFn(...)
+	end
+	_G.__rbcHelperLocalFxHooked = wrapper
+	_G.__rbcHelperLocalFxHookMethod = "table"
+	gameApi.LocalFX.ClientRun = wrapper
+	self.installedFxWrapper = wrapper
+	self.origFxClientRun = origFn
+end
+
+function fpsOptimizer:UnhookLocalFx()
+	_G.__rbcHelperLocalFxFilter = nil
+	if _G.__rbcHelperLocalFxHookMethod == "table" then
+		if gameApi.LocalFX and _G.__rbcHelperLocalFxOrig and gameApi.LocalFX.ClientRun == _G.__rbcHelperLocalFxHooked then
+			gameApi.LocalFX.ClientRun = _G.__rbcHelperLocalFxOrig
+		end
+		_G.__rbcHelperLocalFxHooked = nil
+		_G.__rbcHelperLocalFxOrig = nil
+		_G.__rbcHelperLocalFxHookMethod = nil
+	end
+	self.installedFxWrapper = nil
+	self.origFxClientRun = nil
+end
+
+function fpsOptimizer:ApplyParticlesFolder()
+	local folder = workspace:FindFirstChild("Particles")
+	if not folder then
+		return
+	end
+	self:SyncParticlesInstance(folder)
+	for _, desc in ipairs(folder:GetDescendants()) do
+		self:SyncParticlesInstance(desc)
+	end
+	if not connections:Get("fpsParticlesDescAdded") and folder.DescendantAdded then
+		connections:Add("fpsParticlesDescAdded", folder.DescendantAdded:Connect(function(desc)
+			if self.filterParticlesActive then
+				self:SyncParticlesInstance(desc)
+			end
+		end))
+	end
+	if not connections:Get("fpsParticlesRemoved") then
+		connections:Add("fpsParticlesRemoved", folder.ChildRemoved:Connect(function(child)
+			self.savedParticles[child] = nil
+			for inst in pairs(self.savedParticles) do
+				if not inst.Parent then
+					self.savedParticles[inst] = nil
+				end
+			end
+		end))
+	end
+end
+
+function fpsOptimizer:SetFilterParticles(enabled)
+	if not enabled then
+		self:RestoreParticles()
+		return
+	end
+	self.filterParticlesActive = true
+	self:EnsureLocalFxHook()
+	_G.__rbcHelperLocalFxFilter = function(arg1, arg2)
+		local fxName = extractLocalFxName(arg1, arg2)
+		if not fxName then
+			return true
+		end
+		if BLOCKED_LOCAL_FX[fxName] then
+			return false
+		end
+		return true
+	end
+	self:ApplyParticlesFolder()
+end
+
+function fpsOptimizer:HideCharacterVisuals(char)
+	if not self.hidePlayersActive or not char or not char.Parent then
+		return
+	end
+	local record = self.savedPlayers[char]
+	if not record then
+		record = {}
+		self.savedPlayers[char] = record
+	end
+	local function hideInst(inst)
+		if inst:IsA("BasePart") then
+			if not record[inst] then
+				local ok, origMod, origShadow = pcall(function()
+					return inst.LocalTransparencyModifier, inst.CastShadow
+				end)
+				if ok then
+					record[inst] = { LocalTransparencyModifier = origMod, CastShadow = origShadow }
+				end
+			end
+			pcall(function()
+				inst.LocalTransparencyModifier = 1
+				inst.CastShadow = false
+			end)
+		elseif inst:IsA("Decal") or inst:IsA("Texture") then
+			if not record[inst] then
+				local ok, origT = pcall(function()
+					return inst.Transparency
+				end)
+				if ok then
+					record[inst] = { Transparency = origT }
+				end
+			end
+			pcall(function()
+				inst.Transparency = 1
+			end)
+		elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("BillboardGui") or inst:IsA("SurfaceGui") then
+			if not record[inst] then
+				local ok, origEn = pcall(function()
+					return inst.Enabled
+				end)
+				if ok then
+					record[inst] = { Enabled = origEn }
+				end
+			end
+			pcall(function()
+				inst.Enabled = false
+			end)
+		end
+	end
+	for _, desc in ipairs(char:GetDescendants()) do
+		hideInst(desc)
+	end
+	local connKey = "fpsPlayerDesc:" .. tostring(char)
+	if not connections:Get(connKey) and char.DescendantAdded then
+		connections:Add(connKey, char.DescendantAdded:Connect(function(desc)
+			if self.hidePlayersActive then
+				hideInst(desc)
+			end
+		end))
+	end
+end
+
+function fpsOptimizer:RestoreCharacterVisuals(char)
+	connections:Cancel("fpsPlayerDesc:" .. tostring(char))
+	local record = self.savedPlayers[char]
+	if not record then
+		return
+	end
+	self.savedPlayers[char] = nil
+	if char and char.Parent then
+		for inst, props in pairs(record) do
+			if inst and inst.Parent then
+				for prop, origVal in pairs(props) do
+					pcall(function()
+						inst[prop] = origVal
+					end)
+				end
+			end
+		end
+	end
+end
+
+function fpsOptimizer:WatchOtherPlayer(player)
+	if not player or player == localPlayer or self.playerCharWatched[player] then
+		return
+	end
+	self.playerCharWatched[player] = true
+	if player.Character then
+		self:HideCharacterVisuals(player.Character)
+	end
+	if player.CharacterAdded then
+		connections:Add("fpsPlayerCharAdded:" .. tostring(player), player.CharacterAdded:Connect(function(char)
+			if self.hidePlayersActive then
+				self:HideCharacterVisuals(char)
+			end
+		end))
+	end
+	if player.CharacterRemoving then
+		connections:Add("fpsPlayerCharRem:" .. tostring(player), player.CharacterRemoving:Connect(function(char)
+			self:RestoreCharacterVisuals(char)
+		end))
+	end
+end
+
+function fpsOptimizer:RestorePlayers()
+	self.hidePlayersActive = false
+	connections:Cancel("fpsPlayerAdded")
+	connections:Cancel("fpsPlayerRemoving")
+	for player in pairs(self.playerCharWatched) do
+		connections:Cancel("fpsPlayerCharAdded:" .. tostring(player))
+		connections:Cancel("fpsPlayerCharRem:" .. tostring(player))
+	end
+	table.clear(self.playerCharWatched)
+	local chars = {}
+	for char in pairs(self.savedPlayers) do
+		table.insert(chars, char)
+	end
+	for _, char in ipairs(chars) do
+		self:RestoreCharacterVisuals(char)
+	end
+end
+
+function fpsOptimizer:SetHidePlayers(enabled)
+	if not enabled then
+		self:RestorePlayers()
+		return
+	end
+	self.hidePlayersActive = true
+	for _, player in ipairs(Players:GetPlayers()) do
+		self:WatchOtherPlayer(player)
+	end
+	if not connections:Get("fpsPlayerAdded") and Players.PlayerAdded then
+		connections:Add("fpsPlayerAdded", Players.PlayerAdded:Connect(function(player)
+			if self.hidePlayersActive then
+				self:WatchOtherPlayer(player)
+			end
+		end))
+	end
+	if not connections:Get("fpsPlayerRemoving") and Players.PlayerRemoving then
+		connections:Add("fpsPlayerRemoving", Players.PlayerRemoving:Connect(function(player)
+			connections:Cancel("fpsPlayerCharAdded:" .. tostring(player))
+			connections:Cancel("fpsPlayerCharRem:" .. tostring(player))
+			self.playerCharWatched[player] = nil
+			if player.Character then
+				self:RestoreCharacterVisuals(player.Character)
+			end
+		end))
+	end
+end
+
+function fpsOptimizer:RestoreFlowers()
+	self.hideFlowersActive = false
+	local entry = self.detachedFlowers
+	self.detachedFlowers = nil
+	if entry and entry.inst and entry.parent then
+		pcall(function()
+			entry.inst.Parent = entry.parent
+		end)
+	end
+end
+
+function fpsOptimizer:SetHideFlowers(enabled)
+	if not enabled then
+		self:RestoreFlowers()
+		return
+	end
+	self.hideFlowersActive = true
+	local flowers = workspace:FindFirstChild("Flowers")
+	if flowers and not self.detachedFlowers then
+		local okParent, origParent = pcall(function()
+			return flowers.Parent
+		end)
+		if okParent and origParent then
+			self.detachedFlowers = { inst = flowers, parent = origParent }
+			pcall(function()
+				flowers.Parent = nil
+			end)
+		end
+	end
+end
+
+function fpsOptimizer:RestoreBalloons()
+	self.hideBalloonsActive = false
+	local entry = self.detachedBalloons
+	self.detachedBalloons = nil
+	if entry and entry.inst and entry.parent and entry.parent.Parent then
+		pcall(function()
+			entry.inst.Parent = entry.parent
+		end)
+	end
+end
+
+function fpsOptimizer:SetHideBalloons(enabled)
+	if not enabled then
+		self:RestoreBalloons()
+		return
+	end
+	self.hideBalloonsActive = true
+	local balloons = workspace:FindFirstChild("Balloons")
+	local fieldBalloons = balloons and balloons:FindFirstChild("FieldBalloons")
+	if fieldBalloons and not self.detachedBalloons then
+		local okParent, origParent = pcall(function()
+			return fieldBalloons.Parent
+		end)
+		if okParent and origParent then
+			self.detachedBalloons = { inst = fieldBalloons, parent = origParent }
+			pcall(function()
+				fieldBalloons.Parent = nil
+			end)
+		end
+	end
+end
+
+function fpsOptimizer:RestoreAll()
+	self:RestoreLowGraphics()
+	self:RestoreBees()
+	self:RestoreParticles()
+	self:UnhookLocalFx()
+	self:RestorePlayers()
+	self:RestoreFlowers()
+	self:RestoreBalloons()
+end
+
 -- Feature D: Standalone BodyGyro Auto-Face Flames & Refresh (Shift Lock compatible)
 local FLAME_RENDER_STEP_NAME = "RbcHelperFlameFace"
 
 local function isShiftLockActive()
 	local ok, active = pcall(function()
 		return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+			or UserInputService.MouseIcon == "rbxasset://textures/MouseLockedCursor.png"
 	end)
 	return ok and active == true
 end
@@ -722,7 +1573,35 @@ local flameController = {
 	stopDig = false,
 	statusLabel = nil,
 	lastStatusText = nil,
+	cachedField = nil,
+	cachedFieldPos = nil,
+	cachedFieldTime = 0,
+	currentTarget = nil,
+	lastScanTime = 0,
+	cachedStopDig = false,
+	cachedModeLabel = "idle",
 }
+
+function flameController:InvalidateTarget()
+	self.currentTarget = nil
+	self.lastScanTime = 0
+end
+
+function flameController:GetCachedField(rootPos, now)
+	if self.cachedField and self.cachedField.Parent and self.cachedFieldPos and (now - self.cachedFieldTime) < 0.1 then
+		local dx = rootPos.X - self.cachedFieldPos.X
+		local dy = rootPos.Y - self.cachedFieldPos.Y
+		local dz = rootPos.Z - self.cachedFieldPos.Z
+		if dx * dx + dy * dy + dz * dz < 9 then
+			return self.cachedField
+		end
+	end
+	local field = getFieldAt(rootPos)
+	self.cachedField = field
+	self.cachedFieldPos = rootPos
+	self.cachedFieldTime = now
+	return field
+end
 
 function flameController:SuppressAutoRotate(hum)
 	if not hum then
@@ -765,19 +1644,26 @@ function flameController:UnbindRenderStep()
 	end
 end
 
-local function inspectFlame(flameObj, recordedSpawnTime, now)
+local function inspectFlame(flameObj, record, now)
 	if not flameObj or not flameObj.Parent then
 		return nil
+	end
+	if type(record) ~= "table" then
+		record = { spawnTime = record }
 	end
 	local pos = getInstancePosition(flameObj)
 	if not pos then
 		return nil
 	end
+	local pf = record.pf
+	if not (pf and pf.Parent) then
+		pf = flameObj:FindFirstChild("PF")
+		record.pf = pf
+	end
+	if not pf then
+		return nil
+	end
 	local okValid, sizeVal = pcall(function()
-		local pf = flameObj:FindFirstChild("PF")
-		if not pf then
-			return nil
-		end
 		local s = pf.Size.Keypoints[1].Value
 		local g = pf.Color.Keypoints[1].Value.G
 		if s <= 1.4 or g <= 0.2 then
@@ -789,14 +1675,19 @@ local function inspectFlame(flameObj, recordedSpawnTime, now)
 		return nil
 	end
 
+	if not record.fieldPos or math.abs(pos.X - record.fieldPos.X) > 2 or math.abs(pos.Z - record.fieldPos.Z) > 2 or (record.field and not record.field.Parent) then
+		record.field = getFieldAt(pos)
+		record.fieldPos = pos
+	end
+
 	local age
-	if type(recordedSpawnTime) == "number" then
-		age = math.max(0, now - recordedSpawnTime)
+	if type(record.spawnTime) == "number" then
+		age = math.max(0, now - record.spawnTime)
 	else
 		local estRem = 1 + math.clamp((sizeVal - 1.4) / 0.35, 0, 1) * 5
 		age = math.max(0, 6 - estRem)
 	end
-	return pos, age
+	return pos, age, record.field
 end
 
 function flameController:SetStatusText(text)
@@ -856,19 +1747,23 @@ end
 function flameController:BindFolder(folder)
 	connections:Cancel("flamesAdded")
 	connections:Cancel("flamesRemoved")
+	self:InvalidateTarget()
 	if not folder then
 		table.clear(self.tracked)
 		return
 	end
 	connections:Add("flamesAdded", folder.ChildAdded:Connect(function(child)
-		self.tracked[child] = os.clock()
+		self.tracked[child] = { spawnTime = os.clock() }
 	end))
 	connections:Add("flamesRemoved", folder.ChildRemoved:Connect(function(child)
+		if self.currentTarget and self.currentTarget.obj == child then
+			self:InvalidateTarget()
+		end
 		self.tracked[child] = nil
 	end))
 	for _, child in ipairs(folder:GetChildren()) do
 		if self.tracked[child] == nil then
-			self.tracked[child] = false
+			self.tracked[child] = { spawnTime = false }
 		end
 	end
 end
@@ -884,17 +1779,21 @@ function flameController:SelectTarget(rootPos, field, now)
 	local bestFallback = nil
 	local stale = nil
 
-	for flameObj, recordedTime in pairs(self.tracked) do
+	for flameObj, record in pairs(self.tracked) do
 		if not flameObj or not flameObj.Parent then
 			stale = stale or {}
 			table.insert(stale, flameObj)
 		else
-			local pos, age = inspectFlame(flameObj, recordedTime, now)
+			if type(record) ~= "table" then
+				record = { spawnTime = record }
+				self.tracked[flameObj] = record
+			end
+			local pos, age, flameField = inspectFlame(flameObj, record, now)
 			if pos then
 				local dx = pos.X - rootPos.X
 				local dz = pos.Z - rootPos.Z
 				local dist = math.sqrt(dx * dx + dz * dz)
-				if dist < maxRange and getFieldAt(pos) == field then
+				if dist < maxRange and flameField == field then
 					if age < refreshAge then
 						hasFreshInRange = true
 					end
@@ -934,6 +1833,7 @@ end
 function flameController:Step(now)
 	if not cfg.flames.enabled then
 		self:ReleaseGyro()
+		self:InvalidateTarget()
 		self.stopDig = false
 		self:SetStatusText("Target: Disabled")
 		return
@@ -943,22 +1843,56 @@ function flameController:Step(now)
 	local hum = getHumanoid()
 	if not rootPart or not hum or not hum.Parent or hum.Health <= 0 then
 		self:ZeroTorque()
+		self:InvalidateTarget()
 		self.stopDig = false
 		self:SetStatusText("Target: Waiting for character")
 		return
 	end
 
 	local rootPos = getInstancePosition(rootPart)
-	local field = rootPos and getFieldAt(rootPos) or nil
+	local currentClock = now or os.clock()
+	local field = rootPos and self:GetCachedField(rootPos, currentClock) or nil
 	if not field then
 		self:ZeroTorque()
+		self:InvalidateTarget()
 		self.stopDig = false
 		self:SetStatusText("Target: Not in a field")
 		return
 	end
 
-	local currentClock = now or os.clock()
-	local targetEntry, stopDig, modeLabel = self:SelectTarget(rootPos, field, currentClock)
+	local targetEntry = self.currentTarget
+	local stopDig = self.cachedStopDig
+	local modeLabel = self.cachedModeLabel
+	local useCached = false
+
+	if targetEntry and targetEntry.obj and targetEntry.obj.Parent and (currentClock - self.lastScanTime) < 0.05 then
+		local rec = self.tracked[targetEntry.obj]
+		if rec then
+			local pos, age, flameField = inspectFlame(targetEntry.obj, rec, currentClock)
+			if pos and flameField == field then
+				local maxRange = math.clamp(tonumber(cfg.flames.maxRange) or 30, 15, 45)
+				local refreshAge = math.clamp(tonumber(cfg.flames.refreshAge) or 3.0, 1.5, 4.5)
+				local dx = pos.X - rootPos.X
+				local dz = pos.Z - rootPos.Z
+				local dist = math.sqrt(dx * dx + dz * dz)
+				if dist < maxRange and (not cfg.flames.onlyRefreshReady or not cfg.flames.refreshPriority or age >= refreshAge) then
+					targetEntry.pos = pos
+					targetEntry.age = age
+					targetEntry.dist = dist
+					useCached = true
+				end
+			end
+		end
+	end
+
+	if not useCached then
+		targetEntry, stopDig, modeLabel = self:SelectTarget(rootPos, field, currentClock)
+		self.currentTarget = targetEntry
+		self.cachedStopDig = stopDig
+		self.cachedModeLabel = modeLabel
+		self.lastScanTime = currentClock
+	end
+
 	self.stopDig = stopDig
 
 	if not targetEntry then
@@ -1001,6 +1935,7 @@ end
 
 function flameController:SetEnabled(enabled)
 	self:UnbindRenderStep()
+	self:InvalidateTarget()
 	if not enabled then
 		self:ReleaseGyro()
 		self.stopDig = false
@@ -1013,7 +1948,7 @@ function flameController:SetEnabled(enabled)
 	elseif pf then
 		for _, child in ipairs(pf:GetChildren()) do
 			if self.tracked[child] == nil then
-				self.tracked[child] = false
+				self.tracked[child] = { spawnTime = false }
 			end
 		end
 	end
@@ -1239,7 +2174,7 @@ function smileyHighlighter:SyncTickConnection()
 			local sig = RunService.RenderStepped or RunService.Heartbeat
 			if sig then
 				connections:Add("smileyTick", sig:Connect(function()
-					self:UpdateAll(os.clock())
+					self:UpdateAll(os.clock(), false)
 				end))
 			end
 		end
@@ -1248,68 +2183,127 @@ function smileyHighlighter:SyncTickConnection()
 	end
 end
 
-function smileyHighlighter:UpdateEntry(entry, now)
+function smileyHighlighter:UpdateEntry(entry, now, force)
 	if not entry then
 		return
 	end
+	local currentNow = now or os.clock()
 	local pos = getInstancePosition(entry.token)
 	if pos and entry.beamPart then
-		pcall(function()
-			entry.beamPart.CFrame = CFrame.new(pos.X, pos.Y - 4.5, pos.Z)
-		end)
+		local last = entry.lastPos
+		if not last or (pos.X - last.X) ^ 2 + (pos.Y - last.Y) ^ 2 + (pos.Z - last.Z) ^ 2 >= 0.0025 then
+			entry.lastPos = pos
+			pcall(function()
+				entry.beamPart.CFrame = CFrame.new(pos.X, pos.Y - 4.5, pos.Z)
+			end)
+		end
 	end
 
-	local remaining = math.max(0, entry.endClock - (now or os.clock()))
-	local color, isRed = getSmileyTimerColor(remaining, entry.totalDuration)
+	local remaining = math.max(0, entry.endClock - currentNow)
+	local isRedNow = remaining < 0.9
 	local enabled = cfg.smiley.enabled == true
 	local showBeam = enabled and cfg.smiley.beam == true
 	local showTimer = enabled and cfg.smiley.timer == true
 
-	if entry.highlight then
+	if not force
+		and entry.lastVisualUpdate ~= nil
+		and (currentNow - entry.lastVisualUpdate) < 0.05
+		and entry.lastIsRed == isRedNow
+		and entry.lastEnabled == enabled
+		and entry.lastShowBeam == showBeam
+		and entry.lastShowTimer == showTimer then
+		return
+	end
+
+	entry.lastVisualUpdate = currentNow
+	local color, isRed = getSmileyTimerColor(remaining, entry.totalDuration)
+	local timerText = string.format("%.1fs", remaining)
+	local titleText = isRed and "TOO LATE" or "SMILEY DUPED"
+
+	local colorChanged = force or not entry.lastColor or math.abs(entry.lastColor.R - color.R) > 0.002 or math.abs(entry.lastColor.G - color.G) > 0.002 or math.abs(entry.lastColor.B - color.B) > 0.002
+	local enabledChanged = force or entry.lastEnabled ~= enabled
+	local beamChanged = force or entry.lastShowBeam ~= showBeam
+	local timerVisChanged = force or entry.lastShowTimer ~= showTimer
+	local titleChanged = force or entry.lastTitleText ~= titleText
+	local timerTextChanged = force or entry.lastTimerText ~= timerText
+
+	entry.lastIsRed = isRedNow
+	entry.lastEnabled = enabled
+	entry.lastShowBeam = showBeam
+	entry.lastShowTimer = showTimer
+	entry.lastColor = color
+	entry.lastTitleText = titleText
+	entry.lastTimerText = timerText
+
+	if entry.highlight and (colorChanged or enabledChanged) then
 		pcall(function()
-			entry.highlight.FillColor = color
-			entry.highlight.Enabled = enabled
+			if colorChanged then
+				entry.highlight.FillColor = color
+			end
+			if enabledChanged then
+				entry.highlight.Enabled = enabled
+			end
 		end)
 	end
-	if entry.selectionBox then
+	if entry.selectionBox and (colorChanged or enabledChanged) then
 		pcall(function()
-			entry.selectionBox.Color3 = color
-			entry.selectionBox.SurfaceColor3 = color
-			entry.selectionBox.Visible = enabled
+			if colorChanged then
+				entry.selectionBox.Color3 = color
+				entry.selectionBox.SurfaceColor3 = color
+			end
+			if enabledChanged then
+				entry.selectionBox.Visible = enabled
+			end
 		end)
 	end
-	if entry.beamPart then
+	if entry.beamPart and (colorChanged or beamChanged) then
 		pcall(function()
-			entry.beamPart.Color = color
-			entry.beamPart.Transparency = showBeam and 0.45 or 1
+			if colorChanged then
+				entry.beamPart.Color = color
+			end
+			if beamChanged then
+				entry.beamPart.Transparency = showBeam and 0.45 or 1
+			end
 		end)
 	end
-	if entry.beamAdornment then
+	if entry.beamAdornment and (colorChanged or beamChanged) then
 		pcall(function()
-			entry.beamAdornment.Color3 = color
-			entry.beamAdornment.Visible = showBeam
+			if colorChanged then
+				entry.beamAdornment.Color3 = color
+			end
+			if beamChanged then
+				entry.beamAdornment.Visible = showBeam
+			end
 		end)
 	end
-	if entry.billboard then
+	if entry.billboard and timerVisChanged then
 		pcall(function()
 			entry.billboard.Enabled = showTimer
 		end)
 	end
-	if entry.stroke then
+	if entry.stroke and colorChanged then
 		pcall(function()
 			entry.stroke.Color = color
 		end)
 	end
-	if entry.titleLabel then
+	if entry.titleLabel and (titleChanged or colorChanged) then
 		pcall(function()
-			entry.titleLabel.Text = isRed and "TOO LATE" or "SMILEY DUPED"
-			entry.titleLabel.TextColor3 = color
+			if titleChanged then
+				entry.titleLabel.Text = titleText
+			end
+			if colorChanged then
+				entry.titleLabel.TextColor3 = color
+			end
 		end)
 	end
-	if entry.timerLabel then
+	if entry.timerLabel and (timerTextChanged or colorChanged) then
 		pcall(function()
-			entry.timerLabel.Text = string.format("%.1fs", remaining)
-			entry.timerLabel.TextColor3 = color
+			if timerTextChanged then
+				entry.timerLabel.Text = timerText
+			end
+			if colorChanged then
+				entry.timerLabel.TextColor3 = color
+			end
 		end)
 	end
 end
@@ -1320,7 +2314,7 @@ function smileyHighlighter:Apply(token, spawnClock)
 	end
 	local now = os.clock()
 	if self.active[token] then
-		self:UpdateEntry(self.active[token], now)
+		self:UpdateEntry(self.active[token], now, true)
 		return
 	end
 
@@ -1618,7 +2612,7 @@ function smileyHighlighter:ApplyFallbackDurationSetting()
 		if entry.isFallback then
 			entry.totalDuration = dur
 			entry.endClock = entry.spawnClock + dur
-			self:UpdateEntry(entry, now)
+			self:UpdateEntry(entry, now, true)
 		end
 	end
 end
@@ -1640,10 +2634,10 @@ function smileyHighlighter:RefreshAll()
 		self:WatchToken(token)
 		self:Classify(token, spawnClock)
 	end
-	self:UpdateAll(os.clock())
+	self:UpdateAll(os.clock(), true)
 end
 
-function smileyHighlighter:UpdateAll(now)
+function smileyHighlighter:UpdateAll(now, force)
 	local currentNow = now or os.clock()
 	local stale = nil
 	for token, entry in pairs(self.active) do
@@ -1651,7 +2645,7 @@ function smileyHighlighter:UpdateAll(now)
 			stale = stale or {}
 			table.insert(stale, token)
 		else
-			self:UpdateEntry(entry, currentNow)
+			self:UpdateEntry(entry, currentNow, force)
 		end
 	end
 	if stale then
@@ -1682,7 +2676,7 @@ function smileyHighlighter:Maintain()
 		end
 	end
 
-	self:UpdateAll(now)
+	self:UpdateAll(now, false)
 end
 
 function smileyHighlighter:ClearAll()
@@ -2779,6 +3773,30 @@ controls.hideDecorations = worldFolder.AddSwitch("Hide Decorations", function(en
 	decorationsController:SetEnabled(enabled)
 end, "decorations", "hide")
 
+controls.lowGraphics = worldFolder.AddSwitch("Low Graphics / Anti-Lag", function(enabled)
+	fpsOptimizer:SetLowGraphics(enabled)
+end, "perf", "lowGraphics")
+
+controls.hideBees = worldFolder.AddSwitch("Hide Bees", function(enabled)
+	fpsOptimizer:SetHideBees(enabled)
+end, "perf", "hideBees")
+
+controls.filterParticles = worldFolder.AddSwitch("Filter Particles (Keep Key FX)", function(enabled)
+	fpsOptimizer:SetFilterParticles(enabled)
+end, "perf", "filterParticles")
+
+controls.hidePlayers = worldFolder.AddSwitch("Hide Other Players", function(enabled)
+	fpsOptimizer:SetHidePlayers(enabled)
+end, "perf", "hidePlayers")
+
+controls.hideFlowers = worldFolder.AddSwitch("Hide Flowers", function(enabled)
+	fpsOptimizer:SetHideFlowers(enabled)
+end, "perf", "hideFlowers")
+
+controls.hideBalloons = worldFolder.AddSwitch("Hide Field Balloons", function(enabled)
+	fpsOptimizer:SetHideBalloons(enabled)
+end, "perf", "hideBalloons")
+
 worldFolder.Toggle(true, true)
 
 -- Right Column: Auto Face Flames (BodyGyro), Digital Smiley Tokens
@@ -2838,6 +3856,12 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.walkspeed.Set(cfg.movement.walkspeed)
 	controls.walkspeed2.Set(cfg.movement.walkspeed2)
 	controls.hideDecorations.Set(cfg.decorations.hide)
+	controls.lowGraphics.Set(cfg.perf.lowGraphics)
+	controls.hideBees.Set(cfg.perf.hideBees)
+	controls.filterParticles.Set(cfg.perf.filterParticles)
+	controls.hidePlayers.Set(cfg.perf.hidePlayers)
+	controls.hideFlowers.Set(cfg.perf.hideFlowers)
+	controls.hideBalloons.Set(cfg.perf.hideBalloons)
 	controls.flamesEnabled.Set(cfg.flames.enabled)
 	controls.flamesShiftLockCompat.Set(cfg.flames.shiftLockCompat)
 	controls.flamesRefreshPriority.Set(cfg.flames.refreshPriority)
@@ -2867,16 +3891,21 @@ local stepMonitor -- forward declared
 local function bindMonstersFolder(folder)
 	connections:Cancel("monstersAdded")
 	connections:Cancel("monstersRemoved")
+	goldCogMonitor:BindContainer(folder, "monsters")
 	if not folder then
 		return
 	end
 	connections:Add("monstersAdded", folder.ChildAdded:Connect(function(child)
-		if child.Name == "Gold Cogmower" and stepMonitor then
-			stepMonitor(true)
+		if child.Name == "Gold Cogmower" then
+			goldCogMonitor:TrackIfMatch(child)
+			if stepMonitor then
+				stepMonitor(true)
+			end
 		end
 	end))
 	connections:Add("monstersRemoved", folder.ChildRemoved:Connect(function(child)
 		if child.Name == "Gold Cogmower" then
+			goldCogMonitor:Untrack(child)
 			monitorState.notified[child] = nil
 			if stepMonitor then
 				stepMonitor(true)
@@ -2900,6 +3929,7 @@ local function bindCameraDupedTokens(cam)
 end
 
 smileyHighlighter:InstallDupedSpawnTap()
+goldCogMonitor:Init()
 bindMonstersFolder(workspace:FindFirstChild("Monsters"))
 flameController:BindFolder(workspace:FindFirstChild("PlayerFlames"))
 bindCameraDupedTokens(workspace.CurrentCamera or workspace:FindFirstChild("Camera"))
@@ -2913,8 +3943,11 @@ if workspace.GetPropertyChangedSignal then
 end
 
 connections:Add("workspaceChildren", workspace.ChildAdded:Connect(function(child)
-	if child.Name == "Gold Cogmower" and stepMonitor then
-		stepMonitor(true)
+	if child.Name == "Gold Cogmower" then
+		goldCogMonitor:TrackIfMatch(child)
+		if stepMonitor then
+			stepMonitor(true)
+		end
 	elseif child.Name == "Monsters" then
 		bindMonstersFolder(child)
 		if stepMonitor then
@@ -2922,6 +3955,30 @@ connections:Add("workspaceChildren", workspace.ChildAdded:Connect(function(child
 		end
 	elseif child.Name == "PlayerFlames" then
 		flameController:BindFolder(child)
+	elseif child.Name == "Bees" and cfg.perf.hideBees then
+		fpsOptimizer:SetHideBees(true)
+	elseif child.Name == "Particles" and cfg.perf.filterParticles then
+		fpsOptimizer:ApplyParticlesFolder()
+	elseif child.Name == "Flowers" and cfg.perf.hideFlowers then
+		if task and task.defer then
+			task.defer(function()
+				if cfg.perf.hideFlowers then
+					fpsOptimizer:SetHideFlowers(true)
+				end
+			end)
+		else
+			fpsOptimizer:SetHideFlowers(true)
+		end
+	elseif child.Name == "Balloons" and cfg.perf.hideBalloons then
+		if task and task.defer then
+			task.defer(function()
+				if cfg.perf.hideBalloons then
+					fpsOptimizer:SetHideBalloons(true)
+				end
+			end)
+		else
+			fpsOptimizer:SetHideBalloons(true)
+		end
 	elseif child.Name == "Camera" and not workspace.CurrentCamera then
 		bindCameraDupedTokens(child)
 	end
@@ -2929,10 +3986,13 @@ end))
 
 connections:Add("workspaceRemoved", workspace.ChildRemoved:Connect(function(child)
 	if child.Name == "Gold Cogmower" then
+		goldCogMonitor:Untrack(child)
 		monitorState.notified[child] = nil
 		if stepMonitor then
 			stepMonitor(true)
 		end
+	elseif child.Name == "Monsters" then
+		bindMonstersFolder(nil)
 	elseif child.Name == "PlayerFlames" then
 		flameController:BindFolder(nil)
 	end
@@ -2958,22 +4018,23 @@ stepMonitor = function(skipMaintain)
 	monitorState.list = list
 	monitorState.total = #list
 
-	goldCountLabel.Text = "Active Golden Cogmowers: " .. #list
+	local countText = "Active Golden Cogmowers: " .. #list
+	if monitorState.lastCountText ~= countText then
+		monitorState.lastCountText = countText
+		goldCountLabel.Text = countText
+	end
 
 	local hudText
-	if #list > 0 then
-		monitorStroke.Color = goldColor
-		monitorAccent.BackgroundColor3 = goldColor
-		monitorDot.BackgroundColor3 = goldDot
-		monitorMainText.TextColor3 = goldText
-		monitorBadge.BackgroundColor3 = goldColor
-		monitorBadge.TextColor3 = Color3.fromRGB(24, 24, 27)
-		monitorBadge.Text = #list == 1 and "GOLD!" or ("GOLD x" .. #list)
+	local badgeText
+	local statusText
+	local hasGold = #list > 0
 
+	if hasGold then
+		badgeText = #list == 1 and "GOLD!" or ("GOLD x" .. #list)
 		if #list == 1 then
 			local g = list[1]
 			hudText = string.format("GOLDEN COGMOWER: %s", g.fieldName)
-			monitorStatusLabel.Text = "Status: GOLD COGMOWER in " .. g.fieldName
+			statusText = "Status: GOLD COGMOWER in " .. g.fieldName
 		else
 			local fieldNames = {}
 			for _, g in ipairs(list) do
@@ -2981,31 +4042,55 @@ stepMonitor = function(skipMaintain)
 			end
 			local joined = table.concat(fieldNames, ", ")
 			hudText = string.format("GOLDEN COGMOWERS (%d): %s", #list, joined)
-			monitorStatusLabel.Text = string.format("Status: %d GOLD COGMOWERS (%s)", #list, joined)
+			statusText = string.format("Status: %d GOLD COGMOWERS (%s)", #list, joined)
 		end
-		monitorStatusLabel.TextColor3 = goldText
 	else
-		monitorStroke.Color = uicolor
-		monitorAccent.BackgroundColor3 = uicolor
-		monitorDot.BackgroundColor3 = Color3.fromRGB(115, 130, 155)
-		monitorMainText.TextColor3 = Color3.fromRGB(215, 220, 230)
-		monitorBadge.BackgroundColor3 = color_4
-		monitorBadge.TextColor3 = Color3.fromRGB(220, 225, 235)
-		monitorBadge.Text = "Gold: 0"
+		badgeText = "Gold: 0"
 		hudText = "GOLDEN COGMOWER  |  None on map"
-		monitorStatusLabel.Text = "Status: No Golden Cogmower on map"
-		monitorStatusLabel.TextColor3 = Color3.new(1, 1, 1)
+		statusText = "Status: No Golden Cogmower on map"
 	end
 
-	monitorMainText.Text = hudText
-	local targetWidth = 440
-	local okSize, measured = pcall(function()
-		return TextService:GetTextSize(hudText, 13, Enum.Font.GothamBold, Vector2.new(1000, 38))
-	end)
-	if okSize and measured then
-		targetWidth = math.clamp(measured.X + 135, 440, 680)
+	if monitorState.lastHasGold ~= hasGold then
+		monitorState.lastHasGold = hasGold
+		if hasGold then
+			monitorStroke.Color = goldColor
+			monitorAccent.BackgroundColor3 = goldColor
+			monitorDot.BackgroundColor3 = goldDot
+			monitorMainText.TextColor3 = goldText
+			monitorBadge.BackgroundColor3 = goldColor
+			monitorBadge.TextColor3 = Color3.fromRGB(24, 24, 27)
+			monitorStatusLabel.TextColor3 = goldText
+		else
+			monitorStroke.Color = uicolor
+			monitorAccent.BackgroundColor3 = uicolor
+			monitorDot.BackgroundColor3 = Color3.fromRGB(115, 130, 155)
+			monitorMainText.TextColor3 = Color3.fromRGB(215, 220, 230)
+			monitorBadge.BackgroundColor3 = color_4
+			monitorBadge.TextColor3 = Color3.fromRGB(220, 225, 235)
+			monitorStatusLabel.TextColor3 = Color3.new(1, 1, 1)
+		end
 	end
-	monitorFrame.Size = UDim2.new(0, targetWidth, 0, 38)
+
+	if monitorState.lastBadgeText ~= badgeText then
+		monitorState.lastBadgeText = badgeText
+		monitorBadge.Text = badgeText
+	end
+	if monitorState.lastStatusText ~= statusText then
+		monitorState.lastStatusText = statusText
+		monitorStatusLabel.Text = statusText
+	end
+	if monitorState.lastHudText ~= hudText then
+		monitorState.lastHudText = hudText
+		monitorMainText.Text = hudText
+		local targetWidth = 440
+		local okSize, measured = pcall(function()
+			return TextService:GetTextSize(hudText, 13, Enum.Font.GothamBold, Vector2.new(1000, 38))
+		end)
+		if okSize and measured then
+			targetWidth = math.clamp(measured.X + 135, 440, 680)
+		end
+		monitorFrame.Size = UDim2.new(0, targetWidth, 0, 38)
+	end
 
 	if not skipMaintain then
 		smileyHighlighter:Maintain()
@@ -3025,8 +4110,14 @@ cleanup = function()
 	connections:CancelAll()
 	walkSpeedController:Restore()
 	decorationsController:Restore()
+	fpsOptimizer:RestoreAll()
+	goldCogMonitor:Clear()
 	flameController:UnbindRenderStep()
 	flameController:ReleaseGyro()
+	flameController:InvalidateTarget()
+	table.clear(flameController.tracked)
+	flameController.cachedField = nil
+	flameController.cachedFieldPos = nil
 	smileyHighlighter:ClearAll()
 	if ScreenGui and ScreenGui.Parent then
 		ScreenGui:Destroy()
@@ -3050,6 +4141,7 @@ if isTestHarness then
 	api.walkSpeedController = walkSpeedController
 	api.goldCogMonitor = goldCogMonitor
 	api.decorationsController = decorationsController
+	api.fpsOptimizer = fpsOptimizer
 	api.flameController = flameController
 	api.smileyHighlighter = smileyHighlighter
 	api.monitorState = monitorState

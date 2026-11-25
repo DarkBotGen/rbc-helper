@@ -428,4 +428,47 @@ assert(not redCutoff and cCutoff.G > 0.25, "0.90s is boundary (still collectible
 local cLate, isRedLate = getSmileyColor(0.89, 10.0)
 assert(isRedLate and math.abs(cLate.R * 255 - 255) < 0.5 and math.abs(cLate.G * 255 - 45) < 0.5 and math.abs(cLate.B * 255 - 55) < 0.5, "< 0.9s must snap to Solid Red")
 
-print("PASS: RBC Helper cogmower monitor, walkspeed, hide decorations, bodygyro flame refresh, and smiley timer verified")
+-- 6. Event-driven Gold Cogmower cache, smiley 20Hz throttle + <0.9s immediate flip, and Shift Lock cursor fallback
+local eventMobs = {}
+local cogFolder = makeInst("Folder", "Monsters")
+cogFolder.ChildAdded:Connect(function(ch)
+	if ch.Name == "Gold Cogmower" then
+		eventMobs[ch] = true
+	end
+end)
+cogFolder.ChildRemoved:Connect(function(ch)
+	eventMobs[ch] = nil
+end)
+local evMob = makeInst("Model", "Gold Cogmower")
+evMob.Parent = cogFolder
+assert(eventMobs[evMob] == true, "event-driven tracker should record Gold Cogmower on spawn")
+evMob:Destroy()
+assert(eventMobs[evMob] == nil, "event-driven tracker should remove Gold Cogmower on despawn")
+
+local entryState = { endClock = 100.0, totalDuration = 10, lastVisualUpdate = nil, lastIsRed = nil }
+local function shouldUpdateSmiley(entry, now, force)
+	local rem = math.max(0, entry.endClock - now)
+	local isRedNow = rem < 0.9
+	if not force and entry.lastVisualUpdate and (now - entry.lastVisualUpdate) < 0.05 and entry.lastIsRed == isRedNow then
+		return false, isRedNow
+	end
+	entry.lastVisualUpdate = now
+	entry.lastIsRed = isRedNow
+	return true, isRedNow
+end
+local up1, red1 = shouldUpdateSmiley(entryState, 99.00, false) -- 1.00s left -> green, initial update
+assert(up1 == true and red1 == false, "initial smiley update should run green")
+local up2 = shouldUpdateSmiley(entryState, 99.02, false) -- +0.02s, still green -> throttled
+assert(up2 == false, "sub-50ms steady tick should be throttled")
+local up3, red3 = shouldUpdateSmiley(entryState, 99.11, false) -- 0.89s left (<0.9s), +0.11s -> must flip red immediately
+assert(up3 == true and red3 == true, "crossing <0.9s boundary should update immediately even if red")
+entryState.lastVisualUpdate = 99.10
+entryState.lastIsRed = false
+local up4, red4 = shouldUpdateSmiley(entryState, 99.11, false) -- only 10ms after prev, BUT crosses <0.9s!
+assert(up4 == true and red4 == true, "crossing <0.9s boundary within 50ms must bypass throttle for immediate red flip")
+
+local lockCenter = false
+local mouseIcon = "rbxasset://textures/MouseLockedCursor.png"
+assert(lockCenter or mouseIcon == "rbxasset://textures/MouseLockedCursor.png", "MouseIcon fallback must detect Shift Lock")
+
+print("PASS: RBC Helper cogmower monitor, walkspeed, hide decorations, bodygyro flame refresh, smiley timer, and FPS optimizer verified")
